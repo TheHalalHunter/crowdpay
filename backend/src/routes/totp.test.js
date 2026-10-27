@@ -50,8 +50,8 @@ function buildApp({ queryImpl, totpServiceImpl, bcryptImpl, userOverrides = {} }
       encryptWalletSecret: async secret => `cpws:v1:${secret.slice(0, 8)}`,
     },
     '../services/walletService': {
-      encryptSecret: (s) => `enc:${s}`,
-      decryptSecret: (s) => s.replace(/^enc:/, ''),
+      encryptSecret: s => `enc:${s}`,
+      decryptSecret: s => s.replace(/^enc:/, ''),
     },
     '../services/emailService': {
       sendEmail: () => {},
@@ -151,7 +151,9 @@ test('POST /2fa/verify activates 2FA and returns backup codes', async () => {
       return { rows: [] };
     },
     totpServiceImpl: {
-      storeBackupCodes: async () => { storedCodes = true; },
+      storeBackupCodes: async () => {
+        storedCodes = true;
+      },
     },
   });
 
@@ -256,7 +258,9 @@ test('GET /2fa/backup-codes regenerates and returns codes', async () => {
       return { rows: [] };
     },
     totpServiceImpl: {
-      storeBackupCodes: async () => { updated = true; },
+      storeBackupCodes: async () => {
+        updated = true;
+      },
     },
   });
 

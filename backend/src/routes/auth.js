@@ -430,147 +430,154 @@ router.post(
   })
 );
 
-router.post('/login', loginLimiter, loginValidation, validateRequest, asyncHandler(async (req, res) => {
-  /**
-   * @openapi
-   * /api/auth/login:
-   *   post:
-   *     tags: [Users]
-   *     summary: Login
-   *     requestBody:
-   *       required: true
-   *       content:
-   *         application/json:
-   *           schema:
-   *             type: object
-   *             required: [email, password]
-   *             properties:
-   *               email: { type: string, format: email }
-   *               password: { type: string }
-   *     responses:
-   *       200:
-   *         description: OK
-   *         content:
-   *           application/json:
-   *             schema:
-   *               type: object
-   *               required: [token, user]
-   *               properties:
-   *                 token: { type: string }
-   *                 user:
-   *                   type: object
-   *                   properties:
-   *                     id: { type: integer }
-   *                     email: { type: string, format: email }
-   *                     name: { type: string }
-   *                     wallet_public_key: { type: string }
-   *                     role: { type: string }
-   *                     kyc_status: { type: string }
-   *                     kyc_completed_at: { type: string, nullable: true }
-   *                     kyc_required_for_campaigns: { type: boolean }
-   *       401:
-   *         description: Invalid credentials
-   *         content:
-   *           application/json:
-   *             schema:
-   *               type: object
-   *               properties:
-   *                 error: { type: string }
-   * /api/users/login:
-   *   post:
-   *     tags: [Users]
-   *     summary: Login (alias of /api/auth/login)
-   *     requestBody:
-   *       required: true
-   *       content:
-   *         application/json:
-   *           schema:
-   *             type: object
-   *             required: [email, password]
-   *             properties:
-   *               email: { type: string, format: email }
-   *               password: { type: string }
-   *     responses:
-   *       200: { description: OK }
-   *       401: { description: Invalid credentials }
-   */
-  const { email, password } = req.body;
-  const normalizedEmail = String(email || '')
-    .trim()
-    .toLowerCase();
-  const { rows } = await db.query('SELECT * FROM users WHERE LOWER(email) = $1', [normalizedEmail]);
+router.post(
+  '/login',
+  loginLimiter,
+  loginValidation,
+  validateRequest,
+  asyncHandler(async (req, res) => {
+    /**
+     * @openapi
+     * /api/auth/login:
+     *   post:
+     *     tags: [Users]
+     *     summary: Login
+     *     requestBody:
+     *       required: true
+     *       content:
+     *         application/json:
+     *           schema:
+     *             type: object
+     *             required: [email, password]
+     *             properties:
+     *               email: { type: string, format: email }
+     *               password: { type: string }
+     *     responses:
+     *       200:
+     *         description: OK
+     *         content:
+     *           application/json:
+     *             schema:
+     *               type: object
+     *               required: [token, user]
+     *               properties:
+     *                 token: { type: string }
+     *                 user:
+     *                   type: object
+     *                   properties:
+     *                     id: { type: integer }
+     *                     email: { type: string, format: email }
+     *                     name: { type: string }
+     *                     wallet_public_key: { type: string }
+     *                     role: { type: string }
+     *                     kyc_status: { type: string }
+     *                     kyc_completed_at: { type: string, nullable: true }
+     *                     kyc_required_for_campaigns: { type: boolean }
+     *       401:
+     *         description: Invalid credentials
+     *         content:
+     *           application/json:
+     *             schema:
+     *               type: object
+     *               properties:
+     *                 error: { type: string }
+     * /api/users/login:
+     *   post:
+     *     tags: [Users]
+     *     summary: Login (alias of /api/auth/login)
+     *     requestBody:
+     *       required: true
+     *       content:
+     *         application/json:
+     *           schema:
+     *             type: object
+     *             required: [email, password]
+     *             properties:
+     *               email: { type: string, format: email }
+     *               password: { type: string }
+     *     responses:
+     *       200: { description: OK }
+     *       401: { description: Invalid credentials }
+     */
+    const { email, password } = req.body;
+    const normalizedEmail = String(email || '')
+      .trim()
+      .toLowerCase();
+    const { rows } = await db.query('SELECT * FROM users WHERE LOWER(email) = $1', [
+      normalizedEmail,
+    ]);
 
-  if (!rows.length || !(await bcrypt.compare(password, rows[0].password_hash))) {
-    // Record failed login attempt
+    if (!rows.length || !(await bcrypt.compare(password, rows[0].password_hash))) {
+      // Record failed login attempt
+      await recordLoginAttempt({
+        email: normalizedEmail,
+        ip: req.ip,
+        userAgent: req.headers['user-agent'],
+        success: false,
+        failureReason: 'Invalid credentials',
+      });
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    const user = rows[0];
+
+    const enforceResult = await totpService.enforce2faCheck(user);
+    if (enforceResult.enforced) {
+      return res.status(403).json({ error: enforceResult.message });
+    }
+
+    if (user.totp_enabled) {
+      const fingerprint = totpService.generateFingerprint(req);
+      const trusted = await totpService.isDeviceTrusted(user.id, fingerprint);
+      if (trusted) {
+        // Skip 2FA for trusted device
+      } else {
+        return res.json({ requires_2fa: true });
+      }
+    }
+
+    const { accessToken } = generateTokens(user);
+    const { token: refreshToken, expiresAt } = await createRefreshToken(user.id);
+
+    // Get the refresh token ID for session tracking
+    const { rows: rtRows } = await db.query('SELECT id FROM refresh_tokens WHERE token_hash = $1', [
+      hashToken(refreshToken),
+    ]);
+    const refreshTokenId = rtRows[0]?.id;
+
+    // Create user session
+    if (refreshTokenId) {
+      await createUserSession(user.id, refreshTokenId, req);
+    }
+
+    // Check for login anomalies and record attempt
+    await checkLoginAnomalies(user.id, user.email, req);
     await recordLoginAttempt({
+      userId: user.id,
       email: normalizedEmail,
       ip: req.ip,
       userAgent: req.headers['user-agent'],
-      success: false,
-      failureReason: 'Invalid credentials',
+      success: true,
     });
-    return res.status(401).json({ error: 'Invalid credentials' });
-  }
 
-  const user = rows[0];
+    setRefreshTokenCookie(res, refreshToken, expiresAt);
+    setAccessTokenCookie(res, accessToken);
 
-  const enforceResult = await totpService.enforce2faCheck(user);
-  if (enforceResult.enforced) {
-    return res.status(403).json({ error: enforceResult.message });
-  }
-
-  if (user.totp_enabled) {
-    const fingerprint = totpService.generateFingerprint(req);
-    const trusted = await totpService.isDeviceTrusted(user.id, fingerprint);
-    if (trusted) {
-      // Skip 2FA for trusted device
-    } else {
-      return res.json({ requires_2fa: true });
-    }
-  }
-
-  const { accessToken } = generateTokens(user);
-  const { token: refreshToken, expiresAt } = await createRefreshToken(user.id);
-
-  // Get the refresh token ID for session tracking
-  const { rows: rtRows } = await db.query('SELECT id FROM refresh_tokens WHERE token_hash = $1', [
-    hashToken(refreshToken),
-  ]);
-  const refreshTokenId = rtRows[0]?.id;
-
-  // Create user session
-  if (refreshTokenId) {
-    await createUserSession(user.id, refreshTokenId, req);
-  }
-
-  // Check for login anomalies and record attempt
-  await checkLoginAnomalies(user.id, user.email, req);
-  await recordLoginAttempt({
-    userId: user.id,
-    email: normalizedEmail,
-    ip: req.ip,
-    userAgent: req.headers['user-agent'],
-    success: true,
-  });
-
-  setRefreshTokenCookie(res, refreshToken, expiresAt);
-  setAccessTokenCookie(res, accessToken);
-
-  res.json({
-    token: accessToken,
-    user: {
-      id: user.id,
-      email: user.email,
-      name: user.name,
-      wallet_public_key: user.wallet_public_key,
-      wallet_type: user.wallet_type || 'custodial',
-      role: user.role,
-      kyc_status: user.kyc_status,
-      kyc_completed_at: user.kyc_completed_at,
-      kyc_required_for_campaigns: isKycRequiredForCampaigns(),
-    },
-  });
-})
+    res.json({
+      token: accessToken,
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        wallet_public_key: user.wallet_public_key,
+        wallet_type: user.wallet_type || 'custodial',
+        role: user.role,
+        kyc_status: user.kyc_status,
+        kyc_completed_at: user.kyc_completed_at,
+        kyc_required_for_campaigns: isKycRequiredForCampaigns(),
+      },
+    });
+  })
 );
 
 router.post(
@@ -682,279 +689,334 @@ router.post(
   })
 );
 
-router.post('/2fa/setup', requireAuth, asyncHandler(async (req, res) => {
-  const { rows } = await db.query('SELECT * FROM users WHERE id = $1', [req.user.userId]);
-  const user = rows[0];
+router.post(
+  '/2fa/setup',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const { rows } = await db.query('SELECT * FROM users WHERE id = $1', [req.user.userId]);
+    const user = rows[0];
 
-  if (user.role !== 'admin' && user.role !== 'creator') {
-    return res.status(403).json({ error: '2FA is only available for creator and admin accounts' });
-  }
-  if (user.totp_enabled) {
-    return res.status(400).json({ error: '2FA is already enabled' });
-  }
-
-  const secret = totpService.generateSecret();
-  const otpauth = totpService.buildOtpauthUri(user.email, secret);
-  const qrCodeDataUrl = await totpService.generateQrCode(otpauth);
-
-  const encryptedTotpSecret = encryptSecret(secret);
-  await db.query('UPDATE users SET totp_secret = $1 WHERE id = $2', [encryptedTotpSecret, user.id]);
-  await totpService.logAuditEvent(user.id, 'totp_setup_initiated', req);
-
-  res.json({
-    secret,
-    qrCodeDataUrl,
-  });
-})
-);
-
-router.post('/2fa/verify', requireAuth, asyncHandler(async (req, res) => {
-  const { code } = req.body;
-  if (!code) {
-    return res.status(400).json({ error: 'Code is required' });
-  }
-
-  const { rows } = await db.query('SELECT * FROM users WHERE id = $1', [req.user.userId]);
-  const user = rows[0];
-
-  if (!user.totp_secret) {
-    return res.status(400).json({ error: '2FA setup not initiated' });
-  }
-
-  let plainSecret;
-  try {
-    plainSecret = decryptSecret(user.totp_secret);
-  } catch (err) {
-    logger.error('Failed to decrypt TOTP secret — run migrate-totp-secrets', { userId: user.id, error: err.message });
-    return res.status(503).json({ error: 'Service temporarily unavailable. Please try again later.' });
-  }
-  const isValid = totpService.verifyTotp(plainSecret, code);
-  if (!isValid) {
-    return res.status(401).json({ error: 'Invalid 2FA code' });
-  }
-
-  const { raw: rawBackupCodes, hashed: hashedBackupCodes } =
-    await totpService.generateBackupCodes();
-
-  await db.query('UPDATE users SET totp_enabled = true, backup_codes = $1 WHERE id = $2', [
-    hashedBackupCodes,
-    user.id,
-  ]);
-  await totpService.logAuditEvent(user.id, 'totp_enabled', req);
-
-  res.json({
-    message: '2FA enabled successfully',
-    backupCodes: rawBackupCodes,
-  });
-})
-);
-
-router.post('/2fa/disable', requireAuth, asyncHandler(async (req, res) => {
-  const { code } = req.body;
-  if (!code) {
-    return res.status(400).json({ error: 'Current 2FA code is required to disable' });
-  }
-
-  const { rows } = await db.query('SELECT * FROM users WHERE id = $1', [req.user.userId]);
-  const user = rows[0];
-
-  if (!user.totp_enabled) {
-    return res.status(400).json({ error: '2FA is not enabled' });
-  }
-
-  let codeValid = false;
-  if (code.length === 6) {
-    if (!user.totp_secret) {
-      logger.error('TOTP secret is null for user with 2FA enabled — check DB integrity', { userId: user.id });
-      return res.status(503).json({ error: 'Service temporarily unavailable. Please try again later.' });
+    if (user.role !== 'admin' && user.role !== 'creator') {
+      return res
+        .status(403)
+        .json({ error: '2FA is only available for creator and admin accounts' });
     }
+    if (user.totp_enabled) {
+      return res.status(400).json({ error: '2FA is already enabled' });
+    }
+
+    const secret = totpService.generateSecret();
+    const otpauth = totpService.buildOtpauthUri(user.email, secret);
+    const qrCodeDataUrl = await totpService.generateQrCode(otpauth);
+
+    const encryptedTotpSecret = encryptSecret(secret);
+    await db.query('UPDATE users SET totp_secret = $1 WHERE id = $2', [
+      encryptedTotpSecret,
+      user.id,
+    ]);
+    await totpService.logAuditEvent(user.id, 'totp_setup_initiated', req);
+
+    res.json({
+      secret,
+      qrCodeDataUrl,
+    });
+  })
+);
+
+router.post(
+  '/2fa/verify',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const { code } = req.body;
+    if (!code) {
+      return res.status(400).json({ error: 'Code is required' });
+    }
+
+    const { rows } = await db.query('SELECT * FROM users WHERE id = $1', [req.user.userId]);
+    const user = rows[0];
+
+    if (!user.totp_secret) {
+      return res.status(400).json({ error: '2FA setup not initiated' });
+    }
+
     let plainSecret;
     try {
       plainSecret = decryptSecret(user.totp_secret);
     } catch (err) {
-      logger.error('Failed to decrypt TOTP secret — run migrate-totp-secrets', { userId: user.id, error: err.message });
-      return res.status(503).json({ error: 'Service temporarily unavailable. Please try again later.' });
+      logger.error('Failed to decrypt TOTP secret — run migrate-totp-secrets', {
+        userId: user.id,
+        error: err.message,
+      });
+      return res
+        .status(503)
+        .json({ error: 'Service temporarily unavailable. Please try again later.' });
     }
-    codeValid = totpService.verifyTotp(plainSecret, code);
-  } else {
-    const result = await totpService.consumeBackupCode(user.id, code);
-    if (result.consumed) {
-      codeValid = true;
+    const isValid = totpService.verifyTotp(plainSecret, code);
+    if (!isValid) {
+      return res.status(401).json({ error: 'Invalid 2FA code' });
     }
-  }
 
-  if (!codeValid) {
-    return res.status(401).json({ error: 'Invalid 2FA code' });
-  }
+    const { raw: rawBackupCodes, hashed: hashedBackupCodes } =
+      await totpService.generateBackupCodes();
 
-  await db.query(
-    'UPDATE users SET totp_enabled = false, totp_secret = NULL WHERE id = $1',
-    [user.id]
-  );
-  // Delete orphaned backup codes — ON DELETE CASCADE handles account deletion
-  // but not 2FA disable, so we remove them explicitly here.
-  await db.query('DELETE FROM user_backup_codes WHERE user_id = $1', [user.id]);
-  await totpService.revokeAllDevices(user.id);
-  await totpService.logAuditEvent(user.id, 'totp_disabled', req);
+    await db.query('UPDATE users SET totp_enabled = true, backup_codes = $1 WHERE id = $2', [
+      hashedBackupCodes,
+      user.id,
+    ]);
+    await totpService.logAuditEvent(user.id, 'totp_enabled', req);
 
-  res.json({ message: '2FA disabled successfully' });
-})
+    res.json({
+      message: '2FA enabled successfully',
+      backupCodes: rawBackupCodes,
+    });
+  })
 );
 
-router.get('/2fa/backup-codes', requireAuth, asyncHandler(async (req, res) => {
-  const { rows } = await db.query('SELECT * FROM users WHERE id = $1', [req.user.userId]);
-  const user = rows[0];
+router.post(
+  '/2fa/disable',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const { code } = req.body;
+    if (!code) {
+      return res.status(400).json({ error: 'Current 2FA code is required to disable' });
+    }
 
-  if (!user.totp_enabled) {
-    return res.status(400).json({ error: '2FA is not enabled' });
-  }
+    const { rows } = await db.query('SELECT * FROM users WHERE id = $1', [req.user.userId]);
+    const user = rows[0];
 
-  const { raw, hashed } = await totpService.generateBackupCodes();
-  await totpService.storeBackupCodes(user.id, hashed);
-  await totpService.logAuditEvent(user.id, 'backup_codes_regenerated', req);
+    if (!user.totp_enabled) {
+      return res.status(400).json({ error: '2FA is not enabled' });
+    }
 
-  res.json({ backupCodes: raw });
-})
+    let codeValid = false;
+    if (code.length === 6) {
+      if (!user.totp_secret) {
+        logger.error('TOTP secret is null for user with 2FA enabled — check DB integrity', {
+          userId: user.id,
+        });
+        return res
+          .status(503)
+          .json({ error: 'Service temporarily unavailable. Please try again later.' });
+      }
+      let plainSecret;
+      try {
+        plainSecret = decryptSecret(user.totp_secret);
+      } catch (err) {
+        logger.error('Failed to decrypt TOTP secret — run migrate-totp-secrets', {
+          userId: user.id,
+          error: err.message,
+        });
+        return res
+          .status(503)
+          .json({ error: 'Service temporarily unavailable. Please try again later.' });
+      }
+      codeValid = totpService.verifyTotp(plainSecret, code);
+    } else {
+      const result = await totpService.consumeBackupCode(user.id, code);
+      if (result.consumed) {
+        codeValid = true;
+      }
+    }
+
+    if (!codeValid) {
+      return res.status(401).json({ error: 'Invalid 2FA code' });
+    }
+
+    await db.query('UPDATE users SET totp_enabled = false, totp_secret = NULL WHERE id = $1', [
+      user.id,
+    ]);
+    // Delete orphaned backup codes — ON DELETE CASCADE handles account deletion
+    // but not 2FA disable, so we remove them explicitly here.
+    await db.query('DELETE FROM user_backup_codes WHERE user_id = $1', [user.id]);
+    await totpService.revokeAllDevices(user.id);
+    await totpService.logAuditEvent(user.id, 'totp_disabled', req);
+
+    res.json({ message: '2FA disabled successfully' });
+  })
 );
 
-router.post('/2fa/trust-device', requireAuth, asyncHandler(async (req, res) => {
-  const { code } = req.body;
-  if (!code) {
-    return res.status(400).json({ error: '2FA code is required to trust device' });
-  }
+router.get(
+  '/2fa/backup-codes',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const { rows } = await db.query('SELECT * FROM users WHERE id = $1', [req.user.userId]);
+    const user = rows[0];
 
-  const { rows } = await db.query('SELECT * FROM users WHERE id = $1', [req.user.userId]);
-  const user = rows[0];
+    if (!user.totp_enabled) {
+      return res.status(400).json({ error: '2FA is not enabled' });
+    }
 
-  if (!user.totp_enabled) {
-    return res.status(400).json({ error: '2FA is not enabled' });
-  }
+    const { raw, hashed } = await totpService.generateBackupCodes();
+    await totpService.storeBackupCodes(user.id, hashed);
+    await totpService.logAuditEvent(user.id, 'backup_codes_regenerated', req);
 
-  if (!user.totp_secret) {
-    logger.error('TOTP secret is null for user with 2FA enabled — check DB integrity', { userId: user.id });
-    return res.status(503).json({ error: 'Service temporarily unavailable. Please try again later.' });
-  }
-
-  let plainSecret;
-  try {
-    plainSecret = decryptSecret(user.totp_secret);
-  } catch (err) {
-    logger.error('Failed to decrypt TOTP secret — run migrate-totp-secrets', { userId: user.id, error: err.message });
-    return res.status(503).json({ error: 'Service temporarily unavailable. Please try again later.' });
-  }
-  const isValid = totpService.verifyTotp(plainSecret, code);
-  if (!isValid) {
-    return res.status(401).json({ error: 'Invalid 2FA code' });
-  }
-
-  const fingerprint = totpService.generateFingerprint(req);
-  await totpService.trustDevice(user.id, fingerprint, req);
-  await totpService.logAuditEvent(user.id, 'device_trusted', req);
-
-  res.json({ message: 'Device trusted successfully' });
-})
+    res.json({ backupCodes: raw });
+  })
 );
 
-router.get('/2fa/devices', requireAuth, asyncHandler(async (req, res) => {
-  const { rows } = await db.query('SELECT * FROM users WHERE id = $1', [req.user.userId]);
-  const user = rows[0];
+router.post(
+  '/2fa/trust-device',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const { code } = req.body;
+    if (!code) {
+      return res.status(400).json({ error: '2FA code is required to trust device' });
+    }
 
-  if (!user.totp_enabled) {
-    return res.status(400).json({ error: '2FA is not enabled' });
-  }
+    const { rows } = await db.query('SELECT * FROM users WHERE id = $1', [req.user.userId]);
+    const user = rows[0];
 
-  const devices = await totpService.getUserDevices(user.id);
-  res.json({ devices });
-})
+    if (!user.totp_enabled) {
+      return res.status(400).json({ error: '2FA is not enabled' });
+    }
+
+    if (!user.totp_secret) {
+      logger.error('TOTP secret is null for user with 2FA enabled — check DB integrity', {
+        userId: user.id,
+      });
+      return res
+        .status(503)
+        .json({ error: 'Service temporarily unavailable. Please try again later.' });
+    }
+
+    let plainSecret;
+    try {
+      plainSecret = decryptSecret(user.totp_secret);
+    } catch (err) {
+      logger.error('Failed to decrypt TOTP secret — run migrate-totp-secrets', {
+        userId: user.id,
+        error: err.message,
+      });
+      return res
+        .status(503)
+        .json({ error: 'Service temporarily unavailable. Please try again later.' });
+    }
+    const isValid = totpService.verifyTotp(plainSecret, code);
+    if (!isValid) {
+      return res.status(401).json({ error: 'Invalid 2FA code' });
+    }
+
+    const fingerprint = totpService.generateFingerprint(req);
+    await totpService.trustDevice(user.id, fingerprint, req);
+    await totpService.logAuditEvent(user.id, 'device_trusted', req);
+
+    res.json({ message: 'Device trusted successfully' });
+  })
 );
 
-router.delete('/2fa/devices/:deviceId', requireAuth, asyncHandler(async (req, res) => {
-  const { rows } = await db.query('SELECT * FROM users WHERE id = $1', [req.user.userId]);
-  const user = rows[0];
+router.get(
+  '/2fa/devices',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const { rows } = await db.query('SELECT * FROM users WHERE id = $1', [req.user.userId]);
+    const user = rows[0];
 
-  if (!user.totp_enabled) {
-    return res.status(400).json({ error: '2FA is not enabled' });
-  }
+    if (!user.totp_enabled) {
+      return res.status(400).json({ error: '2FA is not enabled' });
+    }
 
-  const removed = await totpService.revokeDevice(user.id, parseInt(req.params.deviceId, 10));
-  if (!removed) {
-    return res.status(404).json({ error: 'Device not found' });
-  }
-
-  await totpService.logAuditEvent(user.id, 'device_revoked', req, {
-    deviceId: parseInt(req.params.deviceId, 10),
-  });
-
-  res.json({ message: 'Device removed' });
-})
+    const devices = await totpService.getUserDevices(user.id);
+    res.json({ devices });
+  })
 );
 
-router.get('/2fa/audit-log', requireAuth, asyncHandler(async (req, res) => {
-  const { rows } = await db.query('SELECT * FROM users WHERE id = $1', [req.user.userId]);
-  const user = rows[0];
+router.delete(
+  '/2fa/devices/:deviceId',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const { rows } = await db.query('SELECT * FROM users WHERE id = $1', [req.user.userId]);
+    const user = rows[0];
 
-  if (!user.totp_enabled && user.role !== 'admin') {
-    return res.status(403).json({ error: '2FA is not enabled' });
-  }
+    if (!user.totp_enabled) {
+      return res.status(400).json({ error: '2FA is not enabled' });
+    }
 
-  const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
-  const { rows: events } = await db.query(
-    `SELECT id, event_type, ip_address, user_agent, metadata, created_at
+    const removed = await totpService.revokeDevice(user.id, parseInt(req.params.deviceId, 10));
+    if (!removed) {
+      return res.status(404).json({ error: 'Device not found' });
+    }
+
+    await totpService.logAuditEvent(user.id, 'device_revoked', req, {
+      deviceId: parseInt(req.params.deviceId, 10),
+    });
+
+    res.json({ message: 'Device removed' });
+  })
+);
+
+router.get(
+  '/2fa/audit-log',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const { rows } = await db.query('SELECT * FROM users WHERE id = $1', [req.user.userId]);
+    const user = rows[0];
+
+    if (!user.totp_enabled && user.role !== 'admin') {
+      return res.status(403).json({ error: '2FA is not enabled' });
+    }
+
+    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
+    const { rows: events } = await db.query(
+      `SELECT id, event_type, ip_address, user_agent, metadata, created_at
      FROM security_audit_log
      WHERE user_id = $1
      ORDER BY created_at DESC
      LIMIT $2`,
-    [user.id, limit]
-  );
+      [user.id, limit]
+    );
 
-  res.json({ events });
-})
+    res.json({ events });
+  })
 );
 
-router.post('/refresh', asyncHandler(async (req, res) => {
-  const token = req.cookies?.[REFRESH_TOKEN_COOKIE_NAME];
-  if (!token) {
-    return res.status(401).json({ error: 'No refresh token provided' });
-  }
+router.post(
+  '/refresh',
+  asyncHandler(async (req, res) => {
+    const token = req.cookies?.[REFRESH_TOKEN_COOKIE_NAME];
+    if (!token) {
+      return res.status(401).json({ error: 'No refresh token provided' });
+    }
 
-  const user = await validateRefreshToken(token);
-  if (!user) {
-    return res.status(401).json({ error: 'Invalid or expired refresh token' });
-  }
+    const user = await validateRefreshToken(token);
+    if (!user) {
+      return res.status(401).json({ error: 'Invalid or expired refresh token' });
+    }
 
-  const { accessToken } = generateTokens(user);
-  const { token: newRefreshToken, expiresAt } = await rotateRefreshToken(token, user.id);
+    const { accessToken } = generateTokens(user);
+    const { token: newRefreshToken, expiresAt } = await rotateRefreshToken(token, user.id);
 
-  setRefreshTokenCookie(res, newRefreshToken, expiresAt);
-  setAccessTokenCookie(res, accessToken);
+    setRefreshTokenCookie(res, newRefreshToken, expiresAt);
+    setAccessTokenCookie(res, accessToken);
 
-  res.json({
-    user: {
-      id: user.id,
-      email: user.email,
-      name: user.name,
-      wallet_public_key: user.wallet_public_key,
-      wallet_type: user.wallet_type || 'custodial',
-      role: user.role,
-      kyc_status: user.kyc_status,
-      kyc_completed_at: user.kyc_completed_at,
-      kyc_required_for_campaigns: isKycRequiredForCampaigns(),
-    },
-  });
-})
+    res.json({
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        wallet_public_key: user.wallet_public_key,
+        wallet_type: user.wallet_type || 'custodial',
+        role: user.role,
+        kyc_status: user.kyc_status,
+        kyc_completed_at: user.kyc_completed_at,
+        kyc_required_for_campaigns: isKycRequiredForCampaigns(),
+      },
+    });
+  })
 );
 
-router.post('/logout', asyncHandler(async (req, res) => {
-  const token = req.cookies?.[REFRESH_TOKEN_COOKIE_NAME];
-  if (token) {
-    await revokeRefreshToken(token);
-  }
-  clearRefreshTokenCookie(res);
-  clearAccessTokenCookie(res);
-  // Clear CSRF cookie on logout
-  res.clearCookie('cp_csrf', { path: '/' });
-  res.json({ ok: true });
-})
+router.post(
+  '/logout',
+  asyncHandler(async (req, res) => {
+    const token = req.cookies?.[REFRESH_TOKEN_COOKIE_NAME];
+    if (token) {
+      await revokeRefreshToken(token);
+    }
+    clearRefreshTokenCookie(res);
+    clearAccessTokenCookie(res);
+    // Clear CSRF cookie on logout
+    res.clearCookie('cp_csrf', { path: '/' });
+    res.json({ ok: true });
+  })
 );
 
 router.post(

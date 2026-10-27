@@ -52,10 +52,10 @@ function makeStoreBackupCodes(db) {
       await client.query('BEGIN');
       await client.query('DELETE FROM user_backup_codes WHERE user_id = $1', [userId]);
       for (const hash of hashedCodes) {
-        await client.query(
-          'INSERT INTO user_backup_codes (user_id, code_hash) VALUES ($1, $2)',
-          [userId, hash]
-        );
+        await client.query('INSERT INTO user_backup_codes (user_id, code_hash) VALUES ($1, $2)', [
+          userId,
+          hash,
+        ]);
       }
       await client.query('COMMIT');
     } catch (err) {
@@ -73,7 +73,7 @@ function makeStoreBackupCodes(db) {
 
 test('consumeBackupCode returns { consumed: true } when code matches and DELETE returns a row', async () => {
   const db = {
-    query: async (sql) => {
+    query: async sql => {
       if (sql.includes('SELECT')) return { rows: [{ id: 'uuid-1', code_hash: 'h' }] };
       if (sql.includes('DELETE')) return { rowCount: 1, rows: [{ id: 'uuid-1' }] };
       return { rows: [], rowCount: 0 };
@@ -88,7 +88,7 @@ test('consumeBackupCode returns { consumed: true } when code matches and DELETE 
 
 test('consumeBackupCode returns { consumed: false } when no code matches', async () => {
   const db = {
-    query: async (sql) => {
+    query: async sql => {
       if (sql.includes('SELECT')) return { rows: [{ id: 'uuid-1', code_hash: 'h' }] };
       return { rows: [], rowCount: 0 };
     },
@@ -102,7 +102,7 @@ test('consumeBackupCode returns { consumed: false } when no code matches', async
 
 test('consumeBackupCode returns { consumed: false } when bcrypt matches but DELETE returns rowCount 0', async () => {
   const db = {
-    query: async (sql) => {
+    query: async sql => {
       if (sql.includes('SELECT')) return { rows: [{ id: 'uuid-1', code_hash: 'h' }] };
       if (sql.includes('DELETE')) return { rowCount: 0, rows: [] };
       return { rows: [], rowCount: 0 };
@@ -123,7 +123,7 @@ test('storeBackupCodes issues BEGIN, DELETE, INSERT(s), COMMIT in order', async 
   const calls = [];
 
   const mockClient = {
-    query: async (sql) => {
+    query: async sql => {
       calls.push(sql.trim().split(/\s+/)[0].toUpperCase());
       return { rows: [], rowCount: 0 };
     },
@@ -160,7 +160,7 @@ test('concurrent backup code use: only one succeeds', async () => {
   let deleted = false;
 
   const db = {
-    query: async (sql) => {
+    query: async sql => {
       if (sql.includes('SELECT') && sql.includes('user_backup_codes')) {
         return { rows: [{ id: 'uuid-1', code_hash: 'hashed' }] };
       }
@@ -186,8 +186,8 @@ test('concurrent backup code use: only one succeeds', async () => {
     consumeBackupCode('user-1', 'code'),
   ]);
 
-  const successes = [r1, r2].filter((r) => r.consumed).length;
-  const failures  = [r1, r2].filter((r) => !r.consumed).length;
+  const successes = [r1, r2].filter(r => r.consumed).length;
+  const failures = [r1, r2].filter(r => !r.consumed).length;
   assert.equal(successes, 1, 'exactly one concurrent call should succeed');
-  assert.equal(failures,  1, 'exactly one concurrent call should fail');
+  assert.equal(failures, 1, 'exactly one concurrent call should fail');
 });

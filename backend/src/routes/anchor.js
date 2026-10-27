@@ -779,10 +779,10 @@ router.post('/callbacks/sep24', async (req, res) => {
     // Deduplication: ignore replayed callbacks for the same anchor transaction
     // Must be before the session lookup to short-circuit before any DB reads
     try {
-      await db.query(
-        'INSERT INTO webhook_events(event_source, event_id) VALUES ($1, $2)',
-        ['anchor', transaction.id]
-      );
+      await db.query('INSERT INTO webhook_events(event_source, event_id) VALUES ($1, $2)', [
+        'anchor',
+        transaction.id,
+      ]);
     } catch (dupErr) {
       if (dupErr.code === '23505') {
         return res.status(200).json({ success: true, duplicate: true });
@@ -821,7 +821,10 @@ router.post('/callbacks/sep24', async (req, res) => {
     try {
       auth = await issueAnchorAuthToken({ anchor, user });
     } catch (authErr) {
-      logger.warn('Could not obtain anchor auth for re-fetch in callback', { anchor_deposit_id: session.id, error: authErr.message });
+      logger.warn('Could not obtain anchor auth for re-fetch in callback', {
+        anchor_deposit_id: session.id,
+        error: authErr.message,
+      });
       return res.status(503).json({ error: 'Could not verify transaction status with anchor' });
     }
     let remoteTx;
@@ -833,7 +836,10 @@ router.post('/callbacks/sep24', async (req, res) => {
       });
       remoteTx = remote.transaction || remote;
     } catch (fetchErr) {
-      logger.warn('Anchor transaction re-fetch failed in callback', { anchor_deposit_id: session.id, error: fetchErr.message });
+      logger.warn('Anchor transaction re-fetch failed in callback', {
+        anchor_deposit_id: session.id,
+        error: fetchErr.message,
+      });
       return res.status(503).json({ error: 'Could not re-verify transaction status with anchor' });
     }
     const remoteStatus = remoteTx.status;

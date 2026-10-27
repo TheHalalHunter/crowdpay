@@ -107,10 +107,10 @@ async function storeBackupCodes(userId, hashedCodes) {
     await client.query('BEGIN');
     await client.query('DELETE FROM user_backup_codes WHERE user_id = $1', [userId]);
     for (const hash of hashedCodes) {
-      await client.query(
-        'INSERT INTO user_backup_codes (user_id, code_hash) VALUES ($1, $2)',
-        [userId, hash]
-      );
+      await client.query('INSERT INTO user_backup_codes (user_id, code_hash) VALUES ($1, $2)', [
+        userId,
+        hash,
+      ]);
     }
     await client.query('COMMIT');
   } catch (err) {

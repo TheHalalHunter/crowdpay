@@ -34,10 +34,10 @@ async function handleKycWebhook(req, res) {
     const eventId = payload?.data?.id || null;
     if (eventId) {
       try {
-        await db.query(
-          'INSERT INTO webhook_events(event_source, event_id) VALUES ($1, $2)',
-          ['persona', eventId]
-        );
+        await db.query('INSERT INTO webhook_events(event_source, event_id) VALUES ($1, $2)', [
+          'persona',
+          eventId,
+        ]);
       } catch (dupErr) {
         if (dupErr.code === '23505') {
           return res.status(200).json({ received: true, duplicate: true });

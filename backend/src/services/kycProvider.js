@@ -273,7 +273,11 @@ function verifyPersonaWebhookSignature(rawBody, signatureHeader) {
 
   const nowSec = Math.floor(Date.now() / 1000);
   const parsedTimestamp = parseInt(timestamp, 10);
-  if (!timestamp || isNaN(parsedTimestamp) || nowSec - parsedTimestamp > PERSONA_WEBHOOK_MAX_AGE_SECONDS) {
+  if (
+    !timestamp ||
+    isNaN(parsedTimestamp) ||
+    nowSec - parsedTimestamp > PERSONA_WEBHOOK_MAX_AGE_SECONDS
+  ) {
     return false;
   }
 
