@@ -27,7 +27,7 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-i18next": "^15.7.3",
-    "react-router-dom": "^6.30.6",
+    "react-router-dom": "^6.23.1",
     "react-simplemde-editor": "^5.2.0",
     "recharts": "2.12.7"
   },
@@ -50,7 +50,6 @@
   },
   "overrides": {
     "@grpc/grpc-js": "1.14.5",
-    "follow-redirects": ">=1.16.2",
-    "react-router": ">=6.30.6"
+    "follow-redirects": ">=1.16.2"
   }
 }

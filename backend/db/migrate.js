@@ -17,7 +17,15 @@ const {
 process.env.DATABASE_URL =
   process.env.DATABASE_URL || 'postgres://crowdpay:crowdpay@localhost:5432/crowdpay';
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  // Disable SSL for local/CI environments that run postgres without TLS.
+  // Production DATABASE_URL should include ?sslmode=require to override this.
+  ssl:
+    process.env.DATABASE_URL && process.env.DATABASE_URL.includes('sslmode=require')
+      ? { rejectUnauthorized: true }
+      : false,
+});
 
 const COMMAND = process.argv[2] || 'up';
 
