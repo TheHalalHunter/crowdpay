@@ -1,3 +1,5 @@
+process.env.DATABASE_URL = process.env.DATABASE_URL || 'postgres://crowdpay:crowdpay@localhost:5432/crowdpay';
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const proxyquire = require('proxyquire').noCallThru();
@@ -52,7 +54,7 @@ test('category followers without contributions receive new-campaign digests', as
         if (text.includes('FROM campaign_updates')) return { rows: [] };
         if (text.includes('FROM milestones')) return { rows: [] };
         if (text.includes('FROM campaign_status_events')) return { rows: [] };
-        if (text.includes('INSERT INTO email_digest_deliveries')) return { rows: [] };
+        if (text.includes('INSERT INTO email_digest_deliveries')) return { rows: [{ id: 'digest-1' }] };
         throw new Error(`Unexpected query: ${text.slice(0, 120)}`);
       },
     },

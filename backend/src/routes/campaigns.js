@@ -367,7 +367,7 @@ router.get(
   '/recommended',
   requireAuth,
   asyncHandler(async (req, res) => {
-    const limit = Math.min(Number(req.query.limit || 6), 12);
+    const { limit } = parsePagination(req.query, { limit: 6, max: 12 });
     const rows = await getRecommendedCampaigns(req.user.userId, { limit });
     res.json(rows);
   })
@@ -421,8 +421,7 @@ router.get(
      */
     const { search, status, asset, category, min_progress, sort = 'newest' } = req.query;
     const { min_funding, max_funding, deadline_within, creator_verified, country } = req.query;
-    const limit = Math.min(Number(req.query.limit || 20), 100);
-    const offset = Math.max(Number(req.query.offset || 0), 0);
+    const { limit, offset } = parsePagination(req.query, { limit: 20, max: 100 });
     const filters = [];
     const params = [];
 
@@ -896,7 +895,7 @@ router.post(
 router.get(
   '/trending',
   asyncHandler(async (req, res) => {
-    const limit = Math.min(Number(req.query.limit || 20), 20);
+    const { limit } = parsePagination(req.query, { limit: 20, max: 20 });
     const campaigns = await getTrendingCampaigns({ limit });
     res.json({ campaigns });
   })
@@ -2678,6 +2677,15 @@ router.post(
   (req, res, next) => {
     upload.single('cover_image')(req, res, err => {
       if (err) {
+        if (err.code === 'LIMIT_FILE_SIZE' || err.status === 413) {
+          return res.status(413).json({
+            error: {
+              code: 'LIMIT_FILE_SIZE',
+              message: 'File exceeds maximum allowed size of 5MB',
+              fields: { cover_image: 'File exceeds maximum allowed size of 5MB' },
+            },
+          });
+        }
         return res.status(422).json({
           error: {
             code: 'VALIDATION_ERROR',
@@ -2706,8 +2714,28 @@ router.post(
         'UPDATE campaigns SET cover_image_url = $1 WHERE id = $2 RETURNING *',
         [coverImageUrl, req.params.id]
       );
-      res.json(updatedRows[0]);
+      cache.invalidate(`campaigns:id:${req.params.id}`);
+      cache.invalidatePrefix('campaigns:list:');
+      res.json(stripInternalCampaignFields(updatedRows[0]));
     } catch (err) {
+      if (err.status === 413 || err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(413).json({
+          error: {
+            code: 'LIMIT_FILE_SIZE',
+            message: 'File exceeds maximum allowed size of 5MB',
+            fields: { cover_image: 'File exceeds maximum allowed size of 5MB' },
+          },
+        });
+      }
+      if (err.status === 415) {
+        return res.status(415).json({
+          error: {
+            code: 'UNSUPPORTED_MEDIA_TYPE',
+            message: err.message || 'Unsupported Media Type',
+            fields: { cover_image: err.message || 'Unsupported Media Type' },
+          },
+        });
+      }
       return res.status(500).json({ error: 'Could not upload campaign cover image' });
     }
   }
@@ -2716,8 +2744,7 @@ router.post(
 router.get(
   '/:id/updates',
   asyncHandler(async (req, res) => {
-    const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 10));
-    const offset = Math.max(0, Number(req.query.offset) || 0);
+    const { limit, offset } = parsePagination(req.query, { limit: 10, max: 50 });
     const { rows } = await db.query(
       `SELECT cu.id, cu.campaign_id, cu.author_id, cu.title, cu.body, cu.created_at, u.name AS author_name
      FROM campaign_updates cu
@@ -3576,7 +3603,9 @@ router.post(
 
 function mapDraftError(err, res) {
   if (err.code === 'DRAFT_VERSION_CONFLICT') {
-    return res.status(409).json({ error: err.message, code: err.code, current_version: err.currentVersion });
+    return res
+      .status(409)
+      .json({ error: err.message, code: err.code, current_version: err.currentVersion });
   }
   if (err.statusCode === 404) {
     return res.status(404).json({ error: err.message });

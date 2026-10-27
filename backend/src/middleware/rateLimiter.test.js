@@ -18,7 +18,7 @@ const { ipKeyGenerator } = rateLimit;
 // The window reset tests use a custom limiter with a short window
 process.env.RATE_LIMIT_WINDOW_MS = '1000';
 
-const { embedStatsLimiter, impactStatsLimiter } = require('./rateLimiter');
+const { embedStatsLimiter, impactStatsLimiter, cspReportLimiter } = require('./rateLimiter');
 
 // ---------------------------------------------------------------------------
 // Build a minimal test app
@@ -76,6 +76,22 @@ describe('Rate Limiter Middleware', () => {
       assert.ok(res.headers['ratelimit-limit']);
       assert.ok(res.headers['ratelimit-remaining']);
       assert.ok(res.headers['ratelimit-reset']);
+    });
+  });
+
+  // ── cspReportLimiter ─────────────────────────────────────────────────────
+  describe('cspReportLimiter', () => {
+    it('limits CSP reports to 30 per minute per IP', async () => {
+      const app = express();
+      app.post('/csp-report', cspReportLimiter, (_req, res) => res.status(204).end());
+      const cspAgent = supertest(app);
+
+      for (let i = 0; i < 30; i += 1) {
+        const res = await cspAgent.post('/csp-report').send({});
+        assert.equal(res.status, 204);
+      }
+      const limited = await cspAgent.post('/csp-report').send({});
+      assert.equal(limited.status, 429);
     });
   });
 

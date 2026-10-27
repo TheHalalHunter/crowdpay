@@ -28,6 +28,7 @@ function buildApp({
   getRecommendedCampaignsImpl,
   reportImpl,
   signedTokenValid,
+  uploadCampaignCoverImageImpl,
 }) {
   const queryCalls = [];
   const wrappedQueryImpl = async (text, params) => {
@@ -100,7 +101,7 @@ function buildApp({
       },
     },
     '../services/storage': {
-      uploadCampaignCoverImage: async () => '/images/cover.jpg',
+      uploadCampaignCoverImage: uploadCampaignCoverImageImpl || (async () => '/images/cover.jpg'),
     },
     '../services/kycProvider': {
       isKycRequiredForCampaigns: () => process.env.KYC_REQUIRED_FOR_CAMPAIGNS !== 'false',
@@ -1667,4 +1668,132 @@ test('PATCH /api/campaigns/:id full object round-trip works', async () => {
   assert.equal(response.body.min_contribution, '20');
   assert.equal(response.body.max_contribution, '2000');
   assert.equal(response.body.max_per_user, '1000');
+});
+
+test('POST /api/campaigns/:id/cover-image returns 413 when file exceeds limits via multer LIMIT_FILE_SIZE', async () => {
+  const app = buildApp({
+    queryImpl: async (text, params) => {
+      if (text.includes('SELECT creator_id FROM campaigns')) {
+        return { rows: [{ creator_id: 'platform-1' }] };
+      }
+      return { rows: [] };
+    },
+  });
+
+  // 6MB buffer exceeds the 5MB MAX_UPLOAD_SIZE
+  const oversizedBuffer = Buffer.alloc(6 * 1024 * 1024, 'a');
+
+  const response = await request(app)
+    .post('/api/campaigns/campaign-1/cover-image')
+    .set('Authorization', 'Bearer token')
+    .attach('cover_image', oversizedBuffer, {
+      filename: 'large-cover.jpg',
+      contentType: 'image/jpeg',
+    });
+
+  assert.equal(response.status, 413);
+  assert.equal(response.body.error.code, 'LIMIT_FILE_SIZE');
+  assert.equal(response.body.error.message, 'File exceeds maximum allowed size of 5MB');
+  assert.equal(response.body.error.fields.cover_image, 'File exceeds maximum allowed size of 5MB');
+});
+
+test('POST /api/campaigns/:id/cover-image returns 413 when storage service rejects oversized file', async () => {
+  const app = buildApp({
+    queryImpl: async (text, params) => {
+      if (text.includes('SELECT creator_id FROM campaigns')) {
+        return { rows: [{ creator_id: 'platform-1' }] };
+      }
+      return { rows: [] };
+    },
+    uploadCampaignCoverImageImpl: async () => {
+      const err = new Error('File exceeds maximum allowed size');
+      err.status = 413;
+      throw err;
+    },
+  });
+
+  const validBuffer = Buffer.from('fake-image-bytes');
+
+  const response = await request(app)
+    .post('/api/campaigns/campaign-1/cover-image')
+    .set('Authorization', 'Bearer token')
+    .attach('cover_image', validBuffer, {
+      filename: 'cover.jpg',
+      contentType: 'image/jpeg',
+    });
+
+  assert.equal(response.status, 413);
+  assert.equal(response.body.error.code, 'LIMIT_FILE_SIZE');
+  assert.equal(response.body.error.message, 'File exceeds maximum allowed size of 5MB');
+  assert.equal(response.body.error.fields.cover_image, 'File exceeds maximum allowed size of 5MB');
+});
+
+test('POST /api/campaigns/:id/cover-image returns 415 when storage service rejects unsupported media type', async () => {
+  const app = buildApp({
+    queryImpl: async (text, params) => {
+      if (text.includes('SELECT creator_id FROM campaigns')) {
+        return { rows: [{ creator_id: 'platform-1' }] };
+      }
+      return { rows: [] };
+    },
+    uploadCampaignCoverImageImpl: async () => {
+      const err = new Error('Unsupported Media Type');
+      err.status = 415;
+      throw err;
+    },
+  });
+
+  const validBuffer = Buffer.from('fake-image-bytes');
+
+  const response = await request(app)
+    .post('/api/campaigns/campaign-1/cover-image')
+    .set('Authorization', 'Bearer token')
+    .attach('cover_image', validBuffer, {
+      filename: 'cover.jpg',
+      contentType: 'image/jpeg',
+    });
+
+  assert.equal(response.status, 415);
+  assert.equal(response.body.error.code, 'UNSUPPORTED_MEDIA_TYPE');
+});
+
+test('POST /api/campaigns/:id/cover-image succeeds with valid image and strips internal fields', async () => {
+  const app = buildApp({
+    queryImpl: async (text, params) => {
+      if (text.includes('SELECT creator_id FROM campaigns')) {
+        return { rows: [{ creator_id: 'platform-1' }] };
+      }
+      if (text.includes('UPDATE campaigns SET cover_image_url = $1 WHERE id = $2')) {
+        return {
+          rows: [
+            {
+              id: 'campaign-1',
+              title: 'My Campaign',
+              cover_image_url: params[0],
+              fraud_score: 99,
+              fraud_signals: ['test'],
+            },
+          ],
+        };
+      }
+      return { rows: [] };
+    },
+    uploadCampaignCoverImageImpl: async () => 'https://cdn.example.com/cover.jpg',
+  });
+
+  const validBuffer = Buffer.from('fake-image-bytes');
+
+  const response = await request(app)
+    .post('/api/campaigns/campaign-1/cover-image')
+    .set('Authorization', 'Bearer token')
+    .attach('cover_image', validBuffer, {
+      filename: 'cover.jpg',
+      contentType: 'image/jpeg',
+    });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.id, 'campaign-1');
+  assert.equal(response.body.cover_image_url, 'https://cdn.example.com/cover.jpg');
+  assert.equal(response.body.fraud_score, undefined);
+  assert.equal(response.body.fraud_signals, undefined);
 });

@@ -1,0 +1,10 @@
+{
+  "@stellar/freighter-api": {
+    "expiry": "2027-01-30T00:00:00.000Z",
+    "justification": "Known type vulnerability; type definitions update pending; no runtime impact observed"
+  },
+  "dompurify": {
+    "expiry": "2027-03-01T00:00:00.000Z",
+    "justification": "Version pinning for stability; upgrade scheduled after compatibility testing"
+  }
+}

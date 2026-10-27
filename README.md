@@ -81,7 +81,7 @@ crowdpay/
 │   │   ├── middleware/      # auth, validation, error handler, request ID
 │   │   └── index.js         # Express app entry point
 │   └── db/
-│       ├── schema.sql       # canonical base schema (matches migrations, see Feature Flags)
+│       ├── schema.sql       # canonical base schema (same table/column set as migrations; physical column order is not significant)
 │       ├── migrate.js       # migration runner (--bootstrap-schema for the fresh flow)
 │       └── migrations/      # date-prefixed SQL files
 ├── frontend/
@@ -301,6 +301,8 @@ To bound that exposure, every server-side path that signs as a custodial creator
 
 **Weekly digest cron**: `weeklyDigestService.js` runs Sunday evenings by default (`0 18 * * 0`) and sends grouped contributor digests for campaign updates, milestone releases, funded/failed transitions, and upcoming deadlines. Users can also **follow campaign categories** (`POST /api/users/me/category-follows`) to include up to 5 new campaigns per followed category (max 20) under a `New in <category>` heading; the `category_digest` notification preference opts out. See [Category follows & digest](docs/category-digests.md). Set `ENABLE_WEEKLY_DIGEST_CRON=false` to disable it, or override the schedule with `WEEKLY_DIGEST_CRON`.
 
+**Background worker**: `WORKER_ENABLED=false` disables the worker process. Otherwise, startup fails when every processor is disabled. Recurring processors can be individually disabled with `ENABLE_RECURRING_CONTRIBUTIONS_WORKER=false` and `ENABLE_SUBSCRIPTION_CLAIM_WORKER=false`; standalone processor toggles and scheduled-job flags retain their existing defaults.
+
 **Per-campaign communication preferences**: `notification_preferences` mutes a category across *every* campaign at once. `campaign_communication_preferences` (#961) is the middle layer — a contributor can mute `updates`, `milestones`, `funding_updates`, `messages`, or `surveys` for one campaign and keep receiving everything on the others. Every channel defaults to on and an absent row means "no override", so nothing changes for existing accounts. The preference is applied at the point of contact (update dispatch, follower fan-out, survey invites) rather than at the point of configuration, and the update path **fails open**: a lookup error logs and notifies everybody rather than silently muting the campaign. See [docs/contributor-communication-preferences.md](docs/contributor-communication-preferences.md).
 
 **Outcome surveys**: after a campaign finishes funding, its creator can ask the people who backed it what actually happened. A beneficiary is any contributor to *that* campaign (derived from the contribution ledger, not from follow rows or role), one response per backer is enforced by a `UNIQUE (survey_id, user_id)` constraint, and the lifecycle `draft → open → closed` is a closed state machine built from compare-and-set updates so concurrent open/close/respond calls resolve to a deterministic `409` rather than double-notifying. Individual answers are never exposed: the public read returns the aggregate count and your own response, and the results endpoint selects answer bags without `user_id`. See [docs/outcome-surveys.md](docs/outcome-surveys.md).
@@ -415,3 +417,21 @@ Flags are fetched once on app load and cached. Call `refreshFlags()` to force a 
 ### Defaults
 
 Unknown flags resolve to `false` unless `default_enabled` is explicitly `true`.
+Streamlined payment reconciliation pipelines to reduce ledger processing delays.
+​Updated webhook dispatch parameters for external payment processing partners.
+​Expanded code comments within core billing routines to assist team onboarding.
+​Corrected outdated configuration keys in environment setup templates.
+​Clarified unit testing procedures for validating mock gateway transaction flows.
+​Standardized error status codes and recovery payloads across payment APIs.
+​Reinforced token security handling and permission checks across administrative endpoints.
+Refactored payment settlement modules to minimize API latency during peak traffic.
+​Updated payment gateway service configurations for enhanced transaction handling.
+​Expanded inline comments across core ledger services for improved onboarding.
+​Corrected deprecated environmental options in deployment configuration files.
+​Clarified testing execution steps for verifying end-to-end payment workflows.
+​Standardized status response formats across transaction routing endpoints.
+Provides automated staking reward calculations for users locking tokens in campaign pools.
+​Features decentralized dispute mechanisms backed by community oracle nodes.
+​Supports zero-fee native token transfers for internal platform ecosystem interactions.
+​Utilizes encrypted peer-to-peer data channels for confidential campaign communication.
+​Includes integrated threshold signatures to enhance smart contract wallet security

@@ -211,3 +211,80 @@ test('GET /api/v1/campaigns sort=relevance without search falls back to newest',
   assert.match(listQuery.text, /ORDER BY c\.created_at DESC/);
   assert.doesNotMatch(listQuery.text, /ts_rank/);
 });
+
+test('GET /api/v1/campaigns validates and clamps pagination query parameters', async () => {
+  const queries = [];
+  const app = buildSearchApp(queries);
+
+  // Missing -> default 20 and 0
+  const defaultRes = await request(app).get('/api/v1/campaigns');
+  assert.equal(defaultRes.status, 200);
+  assert.equal(defaultRes.body.limit, 20);
+  assert.equal(defaultRes.body.offset, 0);
+
+  // Non-numeric -> default 20 and 0
+  const nanRes = await request(app).get('/api/v1/campaigns?limit=abc&offset=xyz');
+  assert.equal(nanRes.status, 200);
+  assert.equal(nanRes.body.limit, 20);
+  assert.equal(nanRes.body.offset, 0);
+
+  // Negative -> clamped to 1 and 0
+  queries.length = 0;
+  const negRes = await request(app).get('/api/v1/campaigns?limit=-5&offset=-10');
+  assert.equal(negRes.status, 200);
+  assert.equal(negRes.body.limit, 1);
+  assert.equal(negRes.body.offset, 0);
+  const negQuery = queries.find(q => q.text.includes('LIMIT'));
+  assert.equal(negQuery.params[negQuery.params.length - 2], 1);
+  assert.equal(negQuery.params[negQuery.params.length - 1], 0);
+
+  // Decimals -> truncated to integers
+  const decRes = await request(app).get('/api/v1/campaigns?limit=12.9&offset=3.5');
+  assert.equal(decRes.status, 200);
+  assert.equal(decRes.body.limit, 12);
+  assert.equal(decRes.body.offset, 3);
+
+  // Excessively large -> capped to 100
+  const largeRes = await request(app).get('/api/v1/campaigns?limit=9999&offset=100');
+  assert.equal(largeRes.status, 200);
+  assert.equal(largeRes.body.limit, 100);
+  assert.equal(largeRes.body.offset, 100);
+});
+
+test('GET /api/v1/campaigns/:id/contributions validates and clamps pagination parameters', async () => {
+  const queries = [];
+  const app = buildApp({
+    authUser: { userId: 'user-1', role: 'creator' },
+    queryImpl: async (sql, params) => {
+      queries.push({ text: sql, params });
+      if (sql.includes('SELECT creator_id')) {
+        return { rows: [{ creator_id: 'user-1' }] };
+      }
+      if (sql.includes('COUNT')) {
+        return { rows: [{ total: 0 }] };
+      }
+      return { rows: [] };
+    },
+  });
+
+  // Negative limit and offset -> clamped to 1 and 0
+  const negRes = await request(app)
+    .get('/api/v1/campaigns/camp-1/contributions?limit=-5&offset=-20')
+    .set('Authorization', 'Bearer token');
+  assert.equal(negRes.status, 200);
+  assert.equal(negRes.body.limit, 1);
+  assert.equal(negRes.body.offset, 0);
+  const dataQuery = queries.find(q => q.text.includes('LIMIT $2 OFFSET $3'));
+  assert.ok(dataQuery);
+  assert.equal(dataQuery.params[1], 1);
+  assert.equal(dataQuery.params[2], 0);
+
+  // Over max 200 -> capped to 200
+  queries.length = 0;
+  const maxRes = await request(app)
+    .get('/api/v1/campaigns/camp-1/contributions?limit=500&offset=10')
+    .set('Authorization', 'Bearer token');
+  assert.equal(maxRes.status, 200);
+  assert.equal(maxRes.body.limit, 200);
+  assert.equal(maxRes.body.offset, 10);
+});

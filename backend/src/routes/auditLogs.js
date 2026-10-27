@@ -12,6 +12,8 @@ router.get(
       actor: req.query.actor,
       action: req.query.action,
       resourceType: req.query.resourceType,
+      correlationId: req.query.correlationId,
+      source: req.query.source,
       startDate: req.query.dateFrom,
       endDate: req.query.dateTo,
       limit: req.query.limit,
@@ -28,6 +30,8 @@ router.get(
       actor: req.query.actor,
       action: req.query.action,
       resourceType: req.query.resourceType,
+      correlationId: req.query.correlationId,
+      source: req.query.source,
       startDate: req.query.dateFrom,
       endDate: req.query.dateTo,
     };

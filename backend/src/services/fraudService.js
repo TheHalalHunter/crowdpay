@@ -2,7 +2,11 @@ const db = require('../config/database');
 const logger = require('../config/logger');
 const { sendEmail } = require('./emailService');
 
+const { toStroops, STROOPS_PER_UNIT, fromStroops } = require('../utils/stroops');
+
 const FRAUD_THRESHOLD = 75;
+const THRESHOLD_HIGH_STROOPS = 10000n * STROOPS_PER_UNIT;
+const THRESHOLD_MEDIUM_STROOPS = 5000n * STROOPS_PER_UNIT;
 
 /**
  * Extract and calculate feature vectors for a contribution.
@@ -34,11 +38,27 @@ async function extractFeatures({ userId, amount, ipAddress, deviceFingerprint })
     }
   }
 
-  // Lightweight classifier heuristic weights
+  // Decimal-safe contribution amount calculation using exact BigInt stroops (#1085)
   let amountScore = 0;
-  const numAmount = parseFloat(amount || 0);
-  if (numAmount > 10000) amountScore = 40;
-  else if (numAmount > 5000) amountScore = 20;
+  let stroops = 0n;
+  let canonicalAmount = '0.0000000';
+  if (amount !== undefined && amount !== null && amount !== '') {
+    try {
+      stroops = toStroops(amount, { allowZero: true });
+      canonicalAmount = fromStroops(stroops);
+    } catch (err) {
+      logger.warn('Failed to parse contribution amount for fraud scoring, defaulting to zero', {
+        error: err.message,
+        amount,
+      });
+    }
+  }
+
+  if (stroops > THRESHOLD_HIGH_STROOPS) {
+    amountScore = 40;
+  } else if (stroops > THRESHOLD_MEDIUM_STROOPS) {
+    amountScore = 20;
+  }
 
   let frequencyScore = 0;
   if (recentCount > 5) frequencyScore = 35;
@@ -57,7 +77,7 @@ async function extractFeatures({ userId, amount, ipAddress, deviceFingerprint })
   );
 
   const breakdown = {
-    amount: { score: amountScore, detail: `Amount: ${numAmount}` },
+    amount: { score: amountScore, detail: `Amount: ${canonicalAmount}` },
     frequency: { score: frequencyScore, detail: `Recent contributions (24h): ${recentCount}` },
     walletAge: { score: walletAgeScore, detail: `Wallet age days: ${walletAgeDays}` },
     ipReputation: { score: ipScore, detail: `IP: ${ipAddress || 'unknown'}` },

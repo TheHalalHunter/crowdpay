@@ -10,6 +10,8 @@ function buildService({ settings = null, prefs = [] } = {}) {
     delivered: [],
     pushed: [],
     flushed: [],
+    claimedRows: [],
+    deliveryResult: null,
   };
 
   const db = {
@@ -43,7 +45,13 @@ function buildService({ settings = null, prefs = [] } = {}) {
       if (text.includes('SELECT q.id') && text.includes('FROM notification_queue q')) {
         const rows = state.pendingRows || [];
         state.pendingRows = [];
+        state.claimedRows = rows;
         return { rows };
+      }
+      if (text.includes('UPDATE notification_queue SET flushed_at = NULL')) {
+        const retryIds = new Set(params[0]);
+        state.pendingRows.push(...state.claimedRows.filter(row => retryIds.has(row.id)));
+        return { rows: [] };
       }
       if (text.includes('UPDATE notification_queue SET flushed_at')) {
         state.flushed.push(params[0]);
@@ -65,7 +73,7 @@ function buildService({ settings = null, prefs = [] } = {}) {
     messageText: channels.messageText,
     deliver: async (channel, s, message) => {
       state.delivered.push({ channel, message });
-      return true;
+      return state.deliveryResult ? state.deliveryResult(channel, s, message) : true;
     },
   };
 
@@ -306,6 +314,49 @@ test('flushQuietHours handles concurrent flushes without double-sending or losin
   assert.equal(state.delivered.length, 1);
   assert.equal(state.flushed.length, 1);
   assert.deepEqual(state.flushed[0], ['q1']);
+});
+
+test('flushQuietHours retries only failed channels', async () => {
+  const { service, state } = buildService();
+  const slackRow = {
+    id: 'q-slack',
+    user_id: 'user-1',
+    channel: 'slack',
+    type: 'campaign_update',
+    title: 'Slack update',
+    body: null,
+    link: null,
+    slack_webhook_url: 'https://slack.test/hook',
+    quiet_hours_start: null,
+    quiet_hours_end: null,
+  };
+  const discordRow = {
+    ...slackRow,
+    id: 'q-discord',
+    channel: 'discord',
+    title: 'Discord update',
+    slack_webhook_url: null,
+    discord_webhook_url: 'https://discord.test/hook',
+  };
+  state.pendingRows = [slackRow, discordRow];
+  let discordAvailable = false;
+  state.deliveryResult = channel => channel !== 'discord' || discordAvailable;
+
+  const firstAttempt = await service.flushQuietHours({ nowHour: 9 });
+  assert.equal(firstAttempt, 1);
+  assert.deepEqual(
+    state.delivered.map(delivery => delivery.channel),
+    ['slack', 'discord']
+  );
+  assert.deepEqual(state.pendingRows.map(row => row.id), ['q-discord']);
+
+  discordAvailable = true;
+  const retryAttempt = await service.flushQuietHours({ nowHour: 9 });
+  assert.equal(retryAttempt, 1);
+  assert.deepEqual(
+    state.delivered.map(delivery => delivery.channel),
+    ['slack', 'discord', 'discord']
+  );
 });
 
 test('flushQuietHours joins digest item bodies with real newlines and no literal backslash-n', async () => {

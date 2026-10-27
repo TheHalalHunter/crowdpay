@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "description": "Performance budgets for CrowdPay's two primary user paths. Budgets cover frontend Core Web Vitals and backend API latency against the seeded CI dataset.",
+  "regression": {
+    "max_increase_percent": 20,
+    "min_absolute_ms": 25
+  },
+  "paths": {
+    "campaign_discovery": {
+      "label": "Campaign discovery",
+      "web": {
+        "lcp_ms": 2500,
+        "interaction_ms": 200,
+        "js_payload_kb": 350
+      },
+      "api": {
+        "p95_ms": 400,
+        "p99_ms": 1500,
+        "error_rate": 0.01
+      },
+      "k6": {
+        "latency_metric": "discovery_api_latency",
+        "error_metric": "discovery_error_rate"
+      }
+    },
+    "contribution_checkout": {
+      "label": "Contribution checkout",
+      "web": {
+        "lcp_ms": 3000,
+        "interaction_ms": 300,
+        "js_payload_kb": 350
+      },
+      "api": {
+        "p95_ms": 800,
+        "p99_ms": 2500,
+        "error_rate": 0.01
+      },
+      "k6": {
+        "latency_metric": "checkout_api_latency",
+        "error_metric": "checkout_error_rate"
+      }
+    }
+  },
+  "exceptions": []
+}

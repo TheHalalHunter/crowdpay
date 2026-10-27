@@ -222,6 +222,14 @@ export default function RecurringPledgeForm({ campaignId, asset, walletType, onS
     const network = await getNetwork();
     if (network?.error) throw new Error('Could not read Freighter network');
 
+    // Check if the transaction XDR is expired
+    if (prepared.unsignedXdr.timeBounds?.maxTime) {
+      const maxTime = Number(prepared.unsignedXdr.timeBounds.maxTime);
+      if (Math.floor(Date.now() / 1000) > maxTime) {
+        throw new Error('This transaction has expired. Please request a new quote.');
+      }
+    }
+
     const signed = await signTransaction(prepared.unsignedXdr, {
       networkPassphrase: network?.networkPassphrase,
       address: prepared.walletPublicKey,
@@ -238,6 +246,15 @@ export default function RecurringPledgeForm({ campaignId, asset, walletType, onS
       totalPeriods,
     });
     setCreated(subscription);
+    } catch (err) {
+      if (err?.message && err.message.includes('expired')) {
+        setError('This transaction has expired. Please request a new quote.');
+      } else if (err?.message && err.message.includes('network')) {
+        setError('Network mismatch detected. Please switch your wallet to the correct network.');
+      } else {
+        setError(err.message || 'Freighter signing failed');
+      }
+    }
     setShowConfirm(false);
     setOpen(false);
     setAmountPerPeriod('');

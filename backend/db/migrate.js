@@ -9,6 +9,8 @@ const {
   validateMigrationFiles,
   listAllMigrationFilenames,
   loadApplied,
+  acquireMigrationLock,
+  releaseMigrationLock,
 } = require('./migrateLib');
 
 // Match backend/.env.example and docker-compose db service defaults.
@@ -41,9 +43,12 @@ const ALREADY_CREATED_CODES = new Set([
   '42710', // duplicate_object (constraints/indexes on existing objects)
 ]);
 
-async function runUp() {
-  const client = await pool.connect();
+async function runUp(providedClient) {
+  const client = providedClient || (await pool.connect());
+  let lockAcquired = false;
   try {
+    await acquireMigrationLock(client);
+    lockAcquired = true;
     validateMigrationFiles();
     await ensureSchemaMigrationsTable(client);
     const appliedRows = await loadApplied(client);
@@ -98,10 +103,23 @@ async function runUp() {
     // Never swallow the failure silently: an unexplained non-zero exit hides
     // validation errors (e.g. an unsupported migration file) from operators.
     console.error('[migrate] Failed:', err.message);
-    process.exitCode = 1;
+    if (!providedClient) {
+      process.exitCode = 1;
+    } else {
+      throw err;
+    }
   } finally {
-    client.release();
-    await pool.end();
+    if (lockAcquired) {
+      try {
+        await releaseMigrationLock(client);
+      } catch (unlockErr) {
+        console.error('[migrate] Advisory unlock failed:', unlockErr.message);
+      }
+    }
+    if (!providedClient) {
+      client.release();
+      await pool.end();
+    }
   }
 }
 
@@ -185,4 +203,8 @@ async function main() {
   }
 }
 
-main();
+if (require.main === module) {
+  main();
+}
+
+module.exports = { runUp, runStatus, runDown };

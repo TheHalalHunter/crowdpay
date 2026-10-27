@@ -20,6 +20,25 @@ const {
 } = require('../services/fraudService');
 const auditLogsRouter = require('./auditLogs');
 const creatorRefundsRouter = require('./creatorRefunds');
+const {
+  processDelivery,
+  processCampaignWebhookDelivery,
+} = require('../services/webhookDispatcher');
+const { logAuditEvent } = require('../services/auditService');
+
+async function recordPrivilegedAudit(payload) {
+  try {
+    return await logAuditEvent(payload);
+  } catch (err) {
+    logger.error('Privileged audit event failed', {
+      action: payload.action,
+      resource_type: payload.resourceType,
+      resource_id: payload.resourceId,
+      error: err.message,
+    });
+    return null;
+  }
+}
 
 /**
  * @openapi
@@ -209,6 +228,17 @@ router.patch(
       [req.user.userId, 'suspend', 'campaign', id, JSON.stringify({ reason })]
     );
 
+    await recordPrivilegedAudit({
+      actorId: req.user.userId,
+      action: 'campaign.suspended',
+      resourceType: 'campaign',
+      resourceId: id,
+      before: { status: campaignResult.rows[0].status },
+      after: { status: updateResult.rows[0].status, suspended_reason: reason || null },
+      metadata: { reason: reason || null },
+      req,
+    });
+
     cache.invalidatePrefix(`campaign:${id}`);
 
     res.json({ campaign: updateResult.rows[0] });
@@ -249,6 +279,16 @@ router.patch(
       'INSERT INTO admin_actions (admin_user_id, action_type, target_type, target_id) VALUES ($1, $2, $3, $4)',
       [req.user.userId, 'restore', 'campaign', id]
     );
+
+    await recordPrivilegedAudit({
+      actorId: req.user.userId,
+      action: 'campaign.restored',
+      resourceType: 'campaign',
+      resourceId: id,
+      before: { status: campaignResult.rows[0].status },
+      after: { status: updateResult.rows[0].status },
+      req,
+    });
 
     cache.invalidatePrefix(`campaign:${id}`);
 
@@ -497,6 +537,104 @@ router.get(
   })
 );
 
+// Dead letters intentionally expose only delivery metadata and attempt
+// outcomes. Payloads, webhook URLs, signing secrets, and request headers stay
+// out of the operator response; replay uses the original durable delivery row.
+router.get(
+  '/webhook-dead-letters',
+  asyncHandler(async (req, res) => {
+    const { limit, offset } = parsePagination(req.query, { limit: 50, max: 200 });
+    const [countResult, dataResult] = await Promise.all([
+      db.query('SELECT COUNT(*) AS total FROM webhook_dead_letters WHERE resolved_at IS NULL'),
+      db.query(
+        `SELECT id, delivery_kind, delivery_id, webhook_id, event_type, attempt_count,
+                last_error, safe_metadata, replay_count, failed_at, resolved_at
+           FROM webhook_dead_letters
+          WHERE resolved_at IS NULL
+          ORDER BY failed_at DESC LIMIT $1 OFFSET $2`,
+        [limit, offset]
+      ),
+    ]);
+    res.json({
+      data: dataResult.rows,
+      total: Number(countResult.rows[0]?.total || 0),
+      limit,
+      offset,
+    });
+  })
+);
+
+router.post(
+  '/webhook-dead-letters/:id/replay',
+  asyncHandler(async (req, res) => {
+    const client = await db.connect();
+    let deadLetter;
+    try {
+      await client.query('BEGIN');
+      const { rows } = await client.query(
+        `SELECT id, delivery_id, delivery_kind
+           FROM webhook_dead_letters
+          WHERE id = $1 AND resolved_at IS NULL
+          FOR UPDATE`,
+        [req.params.id]
+      );
+      if (!rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Open webhook dead letter not found' });
+      }
+
+      deadLetter = rows[0];
+      const table =
+        deadLetter.delivery_kind === 'campaign'
+          ? 'campaign_webhook_deliveries'
+          : 'webhook_deliveries';
+      const { rows: queued } = await client.query(
+        `UPDATE ${table}
+            SET status = 'pending', attempt_count = 0, last_error = NULL,
+                response_status = NULL, next_retry_at = NULL,
+                delivered_at = NULL, updated_at = NOW()
+          WHERE id = $1 AND status IN ('failed', 'retrying')
+          RETURNING id`,
+        [deadLetter.delivery_id]
+      );
+      if (!queued.length) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: 'Delivery is not in a replayable terminal state' });
+      }
+
+      await client.query(
+        `UPDATE webhook_dead_letters
+            SET replay_count = replay_count + 1, resolved_at = NULL
+          WHERE id = $1`,
+        [deadLetter.id]
+      );
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    const runner =
+      deadLetter.delivery_kind === 'campaign' ? processCampaignWebhookDelivery : processDelivery;
+    setImmediate(() =>
+      runner(deadLetter.delivery_id).catch(err =>
+        logger.error('Admin webhook dead-letter replay failed', {
+          dead_letter_id: deadLetter.id,
+          error: err.message,
+        })
+      )
+    );
+    await db.query(
+      `INSERT INTO admin_actions (admin_user_id, action_type, target_type, target_id, details)
+       VALUES ($1, 'webhook_dead_letter_replay', 'webhook_delivery', $2, $3::jsonb)`,
+      [req.user.userId, deadLetter.delivery_id, JSON.stringify({ dead_letter_id: deadLetter.id })]
+    );
+    res.json({ queued: true, id: deadLetter.id, delivery_id: deadLetter.delivery_id });
+  })
+);
+
 /**
  * @openapi
  * /api/admin/disputes:
@@ -684,11 +822,19 @@ router.patch(
     if (!status) return res.status(422).json({ error: 'status is required' });
     try {
       const updated = await _adminUpdateFulfillment(req.params.fulfillmentId, status, {
-        trackingNumber: tracking_number, carrier, notes,
+        trackingNumber: tracking_number,
+        carrier,
+        notes,
       });
       await db.query(
         'INSERT INTO admin_actions (admin_user_id, action_type, target_type, target_id, details) VALUES ($1,$2,$3,$4,$5)',
-        [req.user.userId, 'fulfillment_update', 'reward_fulfillment', req.params.fulfillmentId, JSON.stringify({ status })]
+        [
+          req.user.userId,
+          'fulfillment_update',
+          'reward_fulfillment',
+          req.params.fulfillmentId,
+          JSON.stringify({ status }),
+        ]
       );
       res.json(updated);
     } catch (err) {

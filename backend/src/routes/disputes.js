@@ -19,6 +19,7 @@ const stellarService = require('../services/stellarService');
 const { ERROR_CODES, allocateProportionalRefunds } = require('../services/dispute');
 const { validateRenderUrl } = require('../utils/urlValidation');
 const { haltScheduledReleases } = require('../services/milestoneAutoRelease');
+const { logAuditEvent } = require('../services/auditService');
 
 function frontendBaseUrl() {
   return (process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/$/, '');
@@ -388,6 +389,22 @@ router.patch(
         actorId: req.user.userId,
         action: `status_changed_to_${status}`,
         note: resolution_note || null,
+      });
+
+      await logAuditEvent({
+        actorId: req.user.userId,
+        action: 'dispute.status_changed',
+        resourceType: 'dispute',
+        resourceId: dispute.id,
+        before: { status: dispute.status },
+        after: { status: updated[0].status, decision: updated[0].decision || null },
+        metadata: {
+          campaign_id: dispute.campaign_id,
+          raised_by: dispute.raised_by,
+          resolution_note: resolution_note || null,
+        },
+        client,
+        req,
       });
 
       if (status === 'resolved_contributor') {
@@ -778,6 +795,24 @@ router.post(
         actorId: req.user.userId,
         action: `decision_${decision}`,
         note: reason || null,
+      });
+
+      await logAuditEvent({
+        actorId: req.user.userId,
+        action: 'dispute.resolved',
+        resourceType: 'dispute',
+        resourceId: dispute.id,
+        before: { status: dispute.status },
+        after: { status: updated[0].status, decision },
+        metadata: {
+          campaign_id: dispute.campaign_id,
+          raised_by: dispute.raised_by,
+          reason: reason || null,
+          refund_count: refunds.length,
+          release_tx_hash: freezeReleaseTxHash || sorobanReleaseTxHash || null,
+        },
+        client,
+        req,
       });
 
       let unfrozenWithdrawals = [];

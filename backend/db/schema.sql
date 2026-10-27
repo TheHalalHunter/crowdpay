@@ -21,7 +21,7 @@ CREATE TABLE users (
   kyc_status              kyc_status NOT NULL DEFAULT 'unverified',
   kyc_provider_reference  TEXT,
   kyc_completed_at        TIMESTAMPTZ,
-  is_admin                BOOLEAN DEFAULT FALSE,
+  is_admin                BOOLEAN NOT NULL DEFAULT FALSE,
   totp_secret             TEXT,
   totp_enabled            BOOLEAN DEFAULT FALSE,
   -- backup_codes TEXT[] removed; backup codes are stored in user_backup_codes
@@ -55,6 +55,9 @@ CREATE TABLE campaigns (
                         'technology', 'community', 'arts', 'education',
                         'environment', 'health', 'business', 'open_source', 'other'
                       )),
+  refund_initiated_at TIMESTAMPTZ,
+  refund_tx_hash      TEXT,
+  refund_xdr          TEXT,
   min_contribution    NUMERIC(20, 7) CHECK (min_contribution > 0),
   max_contribution    NUMERIC(20, 7) CHECK (max_contribution > 0),
   max_per_user        NUMERIC(20, 7) CHECK (max_per_user > 0),
@@ -125,7 +128,7 @@ CREATE TABLE contributions (
   tx_hash             TEXT UNIQUE NOT NULL,  -- deduplicate by Stellar transaction hash
   display_name        VARCHAR(50),
   refunded            BOOLEAN NOT NULL DEFAULT FALSE,
-  refund_status       TEXT CHECK (refund_status IN ('partial', 'full')),
+  refund_status       TEXT DEFAULT 'none' CHECK (refund_status IN ('none', 'partial', 'full')),
   platform_fee_amount NUMERIC(20, 7),
   ip_address          TEXT,
   device_fingerprint  TEXT,   -- salted HMAC of client device fingerprint (never raw)
@@ -238,6 +241,8 @@ CREATE TABLE stellar_transactions (
   signed_xdr              TEXT,
   metadata                JSONB NOT NULL DEFAULT '{}',
   contribution_id         UUID REFERENCES contributions(id),
+  idempotency_actor_id    UUID REFERENCES users(id) ON DELETE SET NULL,
+  idempotency_key         TEXT,
   failure_reason          TEXT,
   created_at              TIMESTAMPTZ DEFAULT NOW(),
   updated_at              TIMESTAMPTZ DEFAULT NOW(),
@@ -256,6 +261,30 @@ CREATE INDEX stellar_transactions_campaign_created_idx
 CREATE INDEX stellar_transactions_status_idx ON stellar_transactions (status);
 CREATE INDEX stellar_transactions_tx_hash_idx ON stellar_transactions (tx_hash);
 CREATE INDEX stellar_transactions_withdrawal_idx ON stellar_transactions (withdrawal_request_id);
+CREATE UNIQUE INDEX stellar_transactions_actor_idempotency_idx
+  ON stellar_transactions (idempotency_actor_id, idempotency_key)
+  WHERE idempotency_actor_id IS NOT NULL AND idempotency_key IS NOT NULL;
+
+-- Durable HTTP mutation idempotency. Redis may accelerate replays, but this
+-- table is the source of truth across restarts and application instances.
+CREATE TABLE idempotency_keys (
+  actor_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  scope          TEXT NOT NULL,
+  key            TEXT NOT NULL,
+  request_hash   TEXT NOT NULL,
+  status         TEXT NOT NULL DEFAULT 'processing'
+                 CHECK (status IN ('processing', 'succeeded', 'failed')),
+  response_status INT,
+  response_body  JSONB,
+  expires_at     TIMESTAMPTZ NOT NULL,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (actor_id, scope, key),
+  CHECK ((status = 'processing' AND response_status IS NULL)
+         OR (status IN ('succeeded', 'failed') AND response_status IS NOT NULL))
+);
+
+CREATE INDEX idempotency_keys_expiry_idx ON idempotency_keys (expires_at);
 
 -- Integrations: API keys (server-to-server) and outbound webhooks
 CREATE TABLE api_keys (
@@ -305,6 +334,39 @@ CREATE INDEX webhook_deliveries_webhook_idx ON webhook_deliveries (webhook_id);
 CREATE INDEX webhook_deliveries_retry_idx
   ON webhook_deliveries (status, next_retry_at)
   WHERE status IN ('pending', 'retrying');
+
+CREATE TABLE webhook_delivery_attempts (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  delivery_kind   TEXT NOT NULL CHECK (delivery_kind IN ('user', 'campaign')),
+  delivery_id     UUID NOT NULL,
+  attempt_number  INT NOT NULL CHECK (attempt_number > 0),
+  started_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  finished_at     TIMESTAMPTZ,
+  response_status INT,
+  succeeded       BOOLEAN NOT NULL DEFAULT FALSE,
+  error_message   TEXT
+);
+
+CREATE UNIQUE INDEX webhook_delivery_attempts_identity_idx
+  ON webhook_delivery_attempts (delivery_kind, delivery_id, attempt_number);
+
+CREATE TABLE webhook_dead_letters (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  delivery_kind   TEXT NOT NULL CHECK (delivery_kind IN ('user', 'campaign')),
+  delivery_id     UUID NOT NULL,
+  webhook_id      UUID NOT NULL,
+  event_type      TEXT NOT NULL,
+  attempt_count   INT NOT NULL,
+  last_error      TEXT,
+  safe_metadata   JSONB NOT NULL DEFAULT '{}',
+  replay_count    INT NOT NULL DEFAULT 0,
+  failed_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  resolved_at     TIMESTAMPTZ,
+  UNIQUE (delivery_kind, delivery_id)
+);
+
+CREATE INDEX webhook_dead_letters_open_idx
+  ON webhook_dead_letters (failed_at DESC) WHERE resolved_at IS NULL;
 
 CREATE TABLE milestones (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -407,10 +469,63 @@ CREATE TABLE ledger_stream_cursors (
   campaign_id         UUID PRIMARY KEY REFERENCES campaigns(id) ON DELETE CASCADE,
   wallet_public_key   TEXT NOT NULL,
   last_cursor         TEXT NOT NULL,
+  last_ledger_sequence BIGINT,
+  last_event_key      TEXT,
+  state               TEXT NOT NULL DEFAULT 'running'
+                      CHECK (state IN ('running', 'paused', 'error')),
+  gap_detected        BOOLEAN NOT NULL DEFAULT FALSE,
+  last_error          TEXT,
   updated_at          TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE INDEX ledger_stream_cursors_wallet_idx ON ledger_stream_cursors (wallet_public_key);
+
+CREATE TABLE ledger_event_receipts (
+  campaign_id       UUID NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  event_key         TEXT NOT NULL,
+  transaction_hash  TEXT,
+  ledger_sequence   BIGINT,
+  paging_token      TEXT,
+  processed_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (campaign_id, event_key)
+);
+
+CREATE TABLE ledger_stream_alerts (
+  id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  campaign_id        UUID NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  alert_type         TEXT NOT NULL CHECK (alert_type IN ('gap', 'reordered')),
+  expected_sequence  BIGINT,
+  observed_sequence  BIGINT,
+  event_key          TEXT,
+  details            JSONB NOT NULL DEFAULT '{}',
+  status             TEXT NOT NULL DEFAULT 'open'
+                     CHECK (status IN ('open', 'acknowledged', 'resolved')),
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  resolved_at        TIMESTAMPTZ
+);
+
+CREATE INDEX ledger_stream_alerts_campaign_idx
+  ON ledger_stream_alerts (campaign_id, created_at DESC);
+
+CREATE TABLE ledger_backfill_requests (
+  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  campaign_id      UUID NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  requested_by     UUID REFERENCES users(id) ON DELETE SET NULL,
+  from_cursor      TEXT NOT NULL,
+  to_cursor        TEXT,
+  max_events       INT NOT NULL CHECK (max_events BETWEEN 1 AND 10000),
+  status           TEXT NOT NULL DEFAULT 'queued'
+                   CHECK (status IN ('queued', 'running', 'completed', 'failed')),
+  processed_events INT NOT NULL DEFAULT 0,
+  replayed_events  INT NOT NULL DEFAULT 0,
+  error_message    TEXT,
+  started_at       TIMESTAMPTZ,
+  completed_at     TIMESTAMPTZ,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX ledger_backfill_requests_campaign_idx
+  ON ledger_backfill_requests (campaign_id, created_at DESC);
 
 -- Refresh tokens for JWT session management
 CREATE TABLE refresh_tokens (
@@ -536,3 +651,32 @@ CREATE INDEX IF NOT EXISTS category_follows_category_idx
   ON category_follows (category);
 CREATE INDEX IF NOT EXISTS category_follows_user_idx
   ON category_follows (user_id);
+
+-- Recurring wallet submissions (#1066). The migration path creates the same
+-- tables for installations that were bootstrapped before this definition.
+CREATE TABLE IF NOT EXISTS subscriptions (
+  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  campaign_id         UUID NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  contributor_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  amount_per_period   NUMERIC(20, 7) NOT NULL CHECK (amount_per_period > 0),
+  asset               TEXT NOT NULL,
+  period_months       INTEGER NOT NULL CHECK (period_months IN (1, 3, 6)),
+  total_periods       INTEGER NOT NULL CHECK (total_periods BETWEEN 2 AND 24),
+  status              TEXT NOT NULL DEFAULT 'active'
+                      CHECK (status IN ('active', 'cancelled', 'completed')),
+  idempotency_actor_id UUID REFERENCES users(id) ON DELETE SET NULL,
+  idempotency_key     TEXT,
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS subscription_balances (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  subscription_id UUID NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+  stellar_balance_id TEXT NOT NULL,
+  scheduled_date TIMESTAMPTZ NOT NULL,
+  amount NUMERIC(20, 7) NOT NULL CHECK (amount > 0),
+  status TEXT NOT NULL DEFAULT 'pending',
+  claimed_at TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX IF NOT EXISTS subscriptions_actor_idempotency_idx
+  ON subscriptions (idempotency_actor_id, idempotency_key)
+  WHERE idempotency_actor_id IS NOT NULL AND idempotency_key IS NOT NULL;

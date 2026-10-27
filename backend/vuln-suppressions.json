@@ -1,0 +1,10 @@
+{
+  "@stellar/stellar-sdk": {
+    "expiry": "2027-01-15T00:00:00.000Z",
+    "justification": "Known vulnerability in transitive dependency; mitigated by pinning to latest compatible patch; tracked in SEC-123"
+  },
+  "bcryptjs": {
+    "expiry": "2027-02-01T00:00:00.000Z",
+    "justification": "Older version used for password hashing; upgrade path planned for Q2 2027; no known exploits in production"
+  }
+}

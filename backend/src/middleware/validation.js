@@ -358,6 +358,12 @@ const contributionValidation = [
       return true;
     })
     .withMessage('tier_id must be a valid UUID'),
+  body('idempotency_key')
+    .optional({ nullable: true })
+    .isString()
+    .withMessage('idempotency_key must be a string')
+    .matches(/^[\x21-\x7e]{1,255}$/)
+    .withMessage('idempotency_key must be 1-255 printable ASCII characters without whitespace'),
 ];
 
 const withdrawalValidation = [

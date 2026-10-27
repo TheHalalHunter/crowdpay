@@ -504,6 +504,12 @@ router.post(
         anchor: publicAnchorInfo(anchor),
       });
     } catch (err) {
+      await db
+        .query(
+          'UPDATE users SET wallet_funding_failed_at = NOW() WHERE id = $1 AND wallet_funded_at IS NULL',
+          [req.user.userId]
+        )
+        .catch(() => {});
       const status = err.statusCode || 503;
       logger.error('SEP-24 wallet deposit start failed', {
         anchor_id,
@@ -586,15 +592,21 @@ router.get(
         localStatus = 'pending_anchor';
       }
 
+      const remoteError =
+        remoteTx.message ||
+        remoteTx.error ||
+        (localStatus === 'failed' ? 'Anchor deposit failed' : null);
+
       await db.query(
         `UPDATE anchor_deposits
        SET status = $1,
            last_anchor_status = $2,
            last_anchor_payload = $3::jsonb,
+           last_error = CASE WHEN $1 = 'failed' THEN COALESCE($5, last_error) ELSE last_error END,
            updated_at = NOW(),
            completed_at = CASE WHEN $1 IN ('completed', 'failed') THEN COALESCE(completed_at, NOW()) ELSE completed_at END
        WHERE id = $4`,
-        [localStatus, remoteStatus, JSON.stringify(remoteTx), session.id]
+        [localStatus, remoteStatus, JSON.stringify(remoteTx), session.id, remoteError]
       );
 
       session = {
@@ -603,6 +615,13 @@ router.get(
         last_anchor_status: remoteStatus,
         last_anchor_payload: remoteTx,
       };
+
+      if (localStatus === 'failed' && session.deposit_type === 'wallet') {
+        await db.query(
+          `UPDATE users SET wallet_funding_failed_at = NOW() WHERE id = $1 AND wallet_funded_at IS NULL`,
+          [session.user_id]
+        );
+      }
 
       if (
         remoteStatus === 'completed' &&
@@ -613,6 +632,10 @@ router.get(
           await db.query(
             `UPDATE anchor_deposits SET status = 'completed', last_error = NULL, updated_at = NOW(), completed_at = COALESCE(completed_at, NOW()) WHERE id = $1`,
             [session.id]
+          );
+          await db.query(
+            `UPDATE users SET wallet_funded_at = COALESCE(wallet_funded_at, NOW()), wallet_funding_failed_at = NULL WHERE id = $1`,
+            [session.user_id]
           );
         } else {
           const campaign = await loadCampaignForContribution(session.campaign_id);
@@ -828,23 +851,40 @@ router.post('/callbacks/sep24', async (req, res) => {
       localStatus = 'pending_anchor';
     }
 
+    const remoteError =
+      transaction.message ||
+      transaction.error ||
+      (localStatus === 'failed' ? 'Anchor deposit failed' : null);
+
     // Transient DB errors below will escape the try/catch and become 500.
     await db.query(
       `UPDATE anchor_deposits
        SET status = $1,
            last_anchor_status = $2,
            last_anchor_payload = $3::jsonb,
+           last_error = CASE WHEN $1 = 'failed' THEN COALESCE($5, last_error) ELSE last_error END,
            updated_at = NOW(),
            completed_at = CASE WHEN $1 IN ('completed', 'failed') THEN COALESCE(completed_at, NOW()) ELSE completed_at END
        WHERE id = $4`,
-      [localStatus, remoteStatus, JSON.stringify(remoteTx), session.id]
+      [localStatus, remoteStatus, JSON.stringify(transaction), session.id, remoteError]
     );
+
+    if (localStatus === 'failed' && session.deposit_type === 'wallet') {
+      await db.query(
+        `UPDATE users SET wallet_funding_failed_at = NOW() WHERE id = $1 AND wallet_funded_at IS NULL`,
+        [session.user_id]
+      );
+    }
 
     if (remoteStatus === 'completed' && !session.contribution_tx_hash && !session.contribution_id) {
       if (session.deposit_type === 'wallet') {
         await db.query(
           `UPDATE anchor_deposits SET status = 'completed', last_error = NULL, updated_at = NOW(), completed_at = COALESCE(completed_at, NOW()) WHERE id = $1`,
           [session.id]
+        );
+        await db.query(
+          `UPDATE users SET wallet_funded_at = COALESCE(wallet_funded_at, NOW()), wallet_funding_failed_at = NULL WHERE id = $1`,
+          [session.user_id]
         );
       } else {
         const campaign = await loadCampaignForContribution(session.campaign_id);

@@ -49,6 +49,18 @@ function buildReconciliation(overrides = {}) {
       if (text.includes('FROM withdrawal_requests') && text.includes('pending')) {
         return { rows: overrides.pendingWithdrawal ? [{ id: 'w-1' }] : [] };
       }
+      if (text.includes('FROM quarantined_payments')) {
+        return {
+          rows: [
+            {
+              total:
+                overrides.quarantinedAmount !== undefined
+                  ? String(overrides.quarantinedAmount)
+                  : '0',
+            },
+          ],
+        };
+      }
       if (text.includes('FROM campaigns WHERE id = $1')) {
         return { rows: [campaignRow] };
       }
@@ -87,12 +99,14 @@ function buildReconciliation(overrides = {}) {
     },
     './stellarService': {
       getCampaignBalance:
-        overrides.getCampaignBalanceImpl || (async () => overrides.onChainBalance || { USDC: '150' }),
+        overrides.getCampaignBalanceImpl ||
+        (async () => overrides.onChainBalance || { USDC: '150' }),
     },
     './sorobanService': {
       getEscrowTotalRaised:
         overrides.getEscrowTotalRaised ||
-        (async () => (overrides.onChainContractStroops === undefined ? 0n : overrides.onChainContractStroops)),
+        (async () =>
+          overrides.onChainContractStroops === undefined ? 0n : overrides.onChainContractStroops),
     },
     './stellarTransactionService': {
       insertContributionAdjustment: async (client, row) => {
@@ -372,3 +386,67 @@ test('the batch summary counts an unreachable wallet as skipped, not an error', 
   assert.strictEqual(summary.results[0].reason, 'wallet_unavailable');
 });
 
+test('reconciliation deducts quarantined payments from live on-chain balance to prevent crediting them', async () => {
+  // DB raised_amount = 100
+  // On-chain wallet balance = 150 (includes 50 from a quarantined invalid payment)
+  // Quarantined payments total = 50
+  // Expected effective live balance = 150 - 50 = 100. Diff = 0. No update!
+  const reconciliation = buildReconciliation({
+    campaign: { raised_amount: '100' },
+    onChainBalance: { USDC: '150' },
+    quarantinedAmount: 50,
+  });
+
+  const result = await reconciliation.reconcileSingleCampaign('camp-1');
+  assert.strictEqual(result.updated, false);
+  assert.strictEqual(result.dbBalance, 100);
+  assert.strictEqual(result.liveBalance, 100);
+  assert.strictEqual(result.diff, 0);
+
+  // Must not apply any correction or insert reconciliation adjustment
+  assert.ok(
+    !queryLog.some(q => q.text.includes('UPDATE campaigns SET raised_amount')),
+    'reconciliation must not credit quarantined payments into raised_amount'
+  );
+  assert.ok(
+    !queryLog.some(q => q.text === 'insertReconciliationAdjustment'),
+    'reconciliation must not book an adjustment for quarantined payments'
+  );
+});
+
+test('reconciliation updates raised_amount based on legitimate on-chain balance after deducting quarantined amount', async () => {
+  // DB raised_amount = 100
+  // On-chain wallet balance = 200 (includes 30 quarantined, so legitimate balance is 170)
+  // Quarantined payments total = 30
+  // Effective live balance = 170. Diff = +70. Update applies for 170!
+  const reconciliation = buildReconciliation({
+    campaign: { raised_amount: '100' },
+    onChainBalance: { USDC: '200' },
+    quarantinedAmount: 30,
+  });
+
+  const result = await reconciliation.reconcileSingleCampaign('camp-1');
+  assert.strictEqual(result.updated, true);
+  assert.strictEqual(result.dbBalance, 100);
+  assert.strictEqual(result.liveBalance, 170);
+  assert.strictEqual(result.diff, 70);
+
+  const update = queryLog.find(
+    q => q.text.includes('UPDATE campaigns') && q.text.includes('raised_amount')
+  );
+  assert.ok(update, 'must apply update for legitimate balance');
+  assert.deepEqual(update.params, [170, 'camp-1']);
+});
+
+test('reconciliation clamps live balance to 0 if quarantined payments exceed on-chain balance', async () => {
+  const reconciliation = buildReconciliation({
+    campaign: { raised_amount: '0' },
+    onChainBalance: { USDC: '10' },
+    quarantinedAmount: 20,
+  });
+
+  const result = await reconciliation.reconcileSingleCampaign('camp-1');
+  assert.strictEqual(result.updated, false);
+  assert.strictEqual(result.liveBalance, 0);
+  assert.strictEqual(result.diff, 0);
+});

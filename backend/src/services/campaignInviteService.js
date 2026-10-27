@@ -11,7 +11,7 @@ function inviteExpiresAt() {
 }
 
 function buildInviteUrl(campaignId, inviteToken) {
-  const base = process.env.FRONTEND_URL || 'http://localhost:5173';
+  const base = (process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/+$/, '');
   return `${base}/campaigns/${campaignId}/invite/${inviteToken}`;
 }
 

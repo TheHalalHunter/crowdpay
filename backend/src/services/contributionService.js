@@ -222,6 +222,7 @@ async function submitCustodialContribution({
   // a client timeout) reuses the existing row/result instead of paying twice.
   const pendingRow = await insertContributionPending(client, {
     idempotencyKey: idempotencyKey || null,
+    idempotencyActorId: userId || null,
     campaignId,
     userId,
     unsignedXdr: null,

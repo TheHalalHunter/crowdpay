@@ -142,7 +142,14 @@ Practice this procedure with the actual roles, encryption keys, and networking u
 
 Monitor PostgreSQL and PgBouncer with provider metrics or `pg_stat_*` views. Alert on database availability, disk/WAL usage, backup status, replication/PITR lag, CPU, memory/cache pressure, connection count, slow queries, lock waits/deadlocks, and long-running transactions. Enable and review `pg_stat_statements` if your provider supports it (it is optional and not required by CrowdPay).
 
-CrowdPay exposes `GET /health`, which checks `SELECT 1` and returns pool totals, idle/waiting clients, maximum pool size, and utilisation. Protect operational endpoints from public access or monitor them through a trusted network. A pool utilisation above 90% is reported to Sentry when configured.
+CrowdPay exposes `GET /health/live` for dependency-free liveness and
+`GET /health/ready` for readiness across PostgreSQL, Redis, Horizon and required
+configuration. The legacy `GET /health` still checks `SELECT 1` and returns
+pool totals, idle/waiting clients, maximum pool size, and utilisation. See
+[`health-checks.md`](health-checks.md) for the probe contract and timeouts.
+Protect operational endpoints from public access or monitor them through a
+trusted network. A pool utilisation above 90% is reported to Sentry when
+configured.
 
 Performance guidance:
 

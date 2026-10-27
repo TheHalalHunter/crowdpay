@@ -144,6 +144,7 @@ export default function ContributeModal({
   const [previewToken, setPreviewToken] = useState(null);
   const [phase, setPhase] = useState('form');
   const [result, setResult] = useState(null);
+  const [rebuildRequested, setRebuildRequested] = useState(false);
   const [feeBps, setFeeBps] = useState(0);
 
   useEffect(() => {
@@ -502,7 +503,16 @@ export default function ContributeModal({
     if (network?.networkPassphrase !== prepared.network_passphrase) {
       const current = network?.network || 'another network';
       throw new Error(
-        `Freighter is connected to ${current}. Switch it to ${prepared.network_name} and try again.`
+        `Freighter is connected to the ${current} network. This campaign is configured for the ${prepared.network_name} network. ` +
+          'Switch your wallet network and try again, or use the rebuild path below to generate a new quote for the correct network.'
+      );
+    }
+
+    // Check if the prepared transaction is expired
+    if (prepared.timeBounds && new Date(prepared.timeBounds.maxTime * 1000) < new Date()) {
+      throw new Error(
+        'This transaction has expired. Please <button className="link-btn" onClick={() => setPhase("rebuild")}>rebuild the quote</button> ' +
+          'or refresh the page to generate a new quote for the current network.'
       );
     }
 
@@ -673,6 +683,11 @@ export default function ContributeModal({
       }
       if (err?.message === SIGNING_CANCELLED) {
         setError('Signing cancelled. Nothing was sent — you can start the payment again.');
+      } else if (err?.message && err.message.includes('expired')) {
+        setError('This transaction has expired. Click "Rebuild quote" to generate a new quote, or refresh the page.');
+        setRebuildRequested(true);
+      } else if (err?.message && err.message.includes('network')) {
+        setError('Network mismatch detected. Please switch your wallet to the correct network and try again.');
       } else {
         setError(
           paymentMethod === 'freighter'
@@ -1152,6 +1167,35 @@ export default function ContributeModal({
                 <p className="alert alert--error" style={{ marginTop: '0.85rem' }} role="alert">
                   {error}
                 </p>
+              )}
+              {rebuildRequested && (
+                <div style={{ marginTop: '0.85rem', minHeight: '3.5rem' }}>
+                  <p style={{ fontSize: '0.85rem', color: 'var(--color-text-hint)' }}>
+                    Enter the contribution amount to rebuild the quote for the correct network.
+                  </p>
+                  <input
+                    id="contrib-amount"
+                    type="number"
+                    inputMode="decimal"
+                    min="0.0000001"
+                    step="any"
+                    placeholder="0.00"
+                    value={amount}
+                    onChange={(e) => setAmount(e.target.value)}
+                  />
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    style={{ marginTop: '0.5rem' }}
+                    onClick={async () => {
+                      setRebuildRequested(false);
+                      setPhase('form');
+                      fetchQuote();
+                    }}
+                  >
+                    Rebuild quote
+                  </button>
+                </div>
               )}
 
               <div style={styles.actions}>

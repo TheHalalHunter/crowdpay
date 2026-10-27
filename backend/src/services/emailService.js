@@ -116,7 +116,19 @@ async function sendIdempotent({ dedupeKey, to, subject, text, html }) {
     return;
   }
 
-  await sendEmail({ to, subject, text, html });
+  try {
+    await sendEmail({ to, subject, text, html });
+  } catch (err) {
+    try {
+      await db.query('DELETE FROM sent_emails WHERE dedupe_key = $1', [dedupeKey]);
+    } catch (cleanupError) {
+      logger.error('Failed to release email dedupe claim', {
+        dedupeKey,
+        error: cleanupError.message,
+      });
+    }
+    throw err;
+  }
 }
 
 async function isUnsubscribed(email, category) {

@@ -13,6 +13,7 @@ const CSRF_EXEMPT_PATHS = new Set([
   '/api/anchor/callbacks',
   '/api/anchor/callbacks/sep24',
   '/api/anchor/sep24',
+  '/api/csp-report',
 ]);
 
 // Parameterized webhook ingress routes: exactly one additional path segment,

@@ -482,7 +482,25 @@ router.patch(
   })
 );
 
-const { generateUserExport, getExportDownloadUrl } = require('../services/exportService');
+const {
+  EXPORT_SCOPES,
+  generateUserExport,
+  getExportDownloadUrl,
+} = require('../services/exportService');
+const { logAuditEvent } = require('../services/auditService');
+
+async function auditExport(payload) {
+  try {
+    await logAuditEvent(payload);
+  } catch (err) {
+    // Audit persistence must not take the export flow down; the failure is
+    // still surfaced in application logs for operators.
+    logger.error('Failed to write data export audit event', {
+      action: payload.action,
+      error: err.message,
+    });
+  }
+}
 
 router.post(
   '/me/exports',
@@ -502,6 +520,15 @@ router.post(
       [req.user.userId]
     );
     const exportId = rows[0].id;
+
+    await auditExport({
+      actorId: req.user.userId,
+      action: 'user_data_export_requested',
+      resourceType: 'user_data_export',
+      resourceId: exportId,
+      metadata: { scopes: Object.keys(EXPORT_SCOPES) },
+      req,
+    });
 
     generateUserExport(req.user.userId, exportId);
 
@@ -537,6 +564,16 @@ router.get(
       return res.status(410).json({ error: 'Export has expired' });
 
     const url = await getExportDownloadUrl(rows[0].file_url);
+
+    await auditExport({
+      actorId: req.user.userId,
+      action: 'user_data_export_downloaded',
+      resourceType: 'user_data_export',
+      resourceId: rows[0].id,
+      metadata: { expires_at: rows[0].expires_at },
+      req,
+    });
+
     res.json({ downloadUrl: url });
   })
 );

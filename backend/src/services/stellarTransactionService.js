@@ -10,10 +10,16 @@ const db = require('../config/database');
 async function insertContributionPending(client, row) {
   const runner = client || db;
   if (row.idempotencyKey) {
-    const existing = await runner.query(
-      `SELECT id, status, tx_hash FROM stellar_transactions WHERE idempotency_key = $1`,
-      [row.idempotencyKey]
-    );
+    const existing = row.idempotencyActorId
+      ? await runner.query(
+          `SELECT id, status, tx_hash FROM stellar_transactions
+             WHERE idempotency_actor_id = $1 AND idempotency_key = $2`,
+          [row.idempotencyActorId, row.idempotencyKey]
+        )
+      : await runner.query(
+          `SELECT id, status, tx_hash FROM stellar_transactions WHERE idempotency_key = $1`,
+          [row.idempotencyKey]
+        );
     if (existing.rows.length) {
       return {
         id: existing.rows[0].id,
@@ -26,8 +32,8 @@ async function insertContributionPending(client, row) {
   const { rows } = await runner.query(
     `INSERT INTO stellar_transactions
        (kind, status, campaign_id, initiated_by_user_id,
-        unsigned_xdr, signed_xdr, metadata, idempotency_key)
-     VALUES ('contribution', 'pending_signatures', $1, $2, $3, $4, $5::jsonb, $6)
+        unsigned_xdr, signed_xdr, metadata, idempotency_actor_id, idempotency_key)
+     VALUES ('contribution', 'pending_signatures', $1, $2, $3, $4, $5::jsonb, $6, $7)
      RETURNING id`,
     [
       row.campaignId,
@@ -35,6 +41,7 @@ async function insertContributionPending(client, row) {
       row.unsignedXdr,
       row.signedXdr,
       JSON.stringify(row.metadata || {}),
+      row.idempotencyActorId || null,
       row.idempotencyKey || null,
     ]
   );
@@ -48,21 +55,26 @@ async function insertContributionPending(client, row) {
  */
 async function markContributionSubmitted(client, id, txHash, extra = {}) {
   const runner = client || db;
+  const updates = ["status = 'submitted'", 'tx_hash = $1'];
+  const params = [txHash, id];
+  if (extra.unsignedXdr) {
+    updates.push('unsigned_xdr = COALESCE($3, unsigned_xdr)');
+    params.push(extra.unsignedXdr);
+  }
+  if (extra.signedXdr) {
+    updates.push(`signed_xdr = COALESCE($${params.length + 1}, signed_xdr)`);
+    params.push(extra.signedXdr);
+  }
+  if (extra.metadata) {
+    updates.push(`metadata = COALESCE(metadata, '{}'::jsonb) || $${params.length + 1}::jsonb`);
+    params.push(JSON.stringify(extra.metadata));
+  }
+  updates.push('updated_at = NOW()');
   await runner.query(
     `UPDATE stellar_transactions
-     SET status = 'submitted', tx_hash = $1,
-         unsigned_xdr = COALESCE($3, unsigned_xdr),
-         signed_xdr = COALESCE($4, signed_xdr),
-         metadata = COALESCE(metadata, '{}'::jsonb) || COALESCE($5::jsonb, '{}'::jsonb),
-         updated_at = NOW()
+     SET ${updates.join(', ')}
      WHERE id = $2`,
-    [
-      txHash,
-      id,
-      extra.unsignedXdr || null,
-      extra.signedXdr || null,
-      extra.metadata ? JSON.stringify(extra.metadata) : null,
-    ]
+    params
   );
 }
 

@@ -820,6 +820,20 @@ router.post(
       note: reason,
     });
 
+    await logAuditEvent({
+      actorId: req.user.userId,
+      action: 'milestone.rejected',
+      resourceType: 'milestone',
+      resourceId: rows[0].id,
+      before: { status: 'pending_review' },
+      after: { status: rows[0].status },
+      metadata: {
+        campaign_id: rows[0].campaign_id,
+        reason,
+      },
+      req,
+    }).catch(e => logger.error('Milestone rejection audit log failed', { error: e.message }));
+
     // Soroban integration: Reject milestone on-chain
     const { rows: campaignRows } = await db.query(
       'SELECT milestones_contract_id, creator_id FROM campaigns WHERE id = $1',
@@ -1173,6 +1187,8 @@ const approveMilestoneReleaseHandler = asyncHandler(async (req, res) => {
       action: 'milestone.released',
       resourceType: 'milestone',
       resourceId: milestone.id,
+      before: { status: 'pending_review' },
+      after: { status: 'released' },
       metadata: {
         release_mode: 'manual',
         campaign_id: milestone.campaign_id,

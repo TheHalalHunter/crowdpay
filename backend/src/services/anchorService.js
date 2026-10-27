@@ -326,11 +326,28 @@ async function getAnchorTransaction({ anchor, authToken, transactionId }) {
 }
 
 function isAnchorTerminalStatus(status) {
-  return ['completed', 'error', 'expired', 'no_market', 'too_small', 'too_large'].includes(status);
+  return [
+    'completed',
+    'error',
+    'expired',
+    'no_market',
+    'too_small',
+    'too_large',
+    'refunded',
+    'partially_failed',
+  ].includes(status);
 }
 
 function isAnchorFailureStatus(status) {
-  return ['error', 'expired', 'no_market', 'too_small', 'too_large'].includes(status);
+  return [
+    'error',
+    'expired',
+    'no_market',
+    'too_small',
+    'too_large',
+    'refunded',
+    'partially_failed',
+  ].includes(status);
 }
 
 module.exports = {

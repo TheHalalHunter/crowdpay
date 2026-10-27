@@ -4,6 +4,10 @@ const express = require('express');
 const request = require('supertest');
 const proxyquire = require('proxyquire').noCallThru();
 
+if (!process.env.DATABASE_URL) {
+  process.env.DATABASE_URL = 'postgres://postgres:postgres@localhost:5432/crowdpay_test';
+}
+
 function buildApp({
   queryImpl,
   anchorServiceImpl = {},
@@ -262,4 +266,186 @@ test('GET /api/anchor/deposits/:id refreshes anchor session status', async () =>
   assert.equal(response.body.status, 'pending_anchor');
   assert.equal(response.body.anchor_status, 'pending');
   assert.ok(queryCount >= 3);
+});
+
+test('GET /api/anchor/deposits/:id updates users.wallet_funding_failed_at when wallet deposit partially fails', async () => {
+  const executedQueries = [];
+  const { app } = buildApp({
+    queryImpl: async (text, params) => {
+      executedQueries.push({ text, params });
+      if (text.includes('FROM anchor_deposits ad')) {
+        return {
+          rows: [
+            {
+              id: 'dep-wallet-1',
+              user_id: 'user-1',
+              deposit_type: 'wallet',
+              campaign_id: null,
+              anchor_id: 'moneygram',
+              anchor_transaction_id: 'anchor-tx-fail',
+              anchor_asset: 'USDC',
+              anchor_amount: '50',
+              status: 'pending_anchor',
+              last_anchor_status: 'pending',
+              last_anchor_payload: {},
+              interactive_url: 'https://anchor.example/flow',
+              anchor_auth_token: 'auth-tok',
+              anchor_auth_expires_at: new Date(Date.now() + 60000),
+              wallet_public_key: 'GUSER',
+              wallet_secret_encrypted: 'encrypted',
+            },
+          ],
+        };
+      }
+      if (text.includes('UPDATE anchor_deposits')) {
+        return { rows: [] };
+      }
+      if (text.includes('UPDATE users SET wallet_funding_failed_at')) {
+        return { rows: [] };
+      }
+      if (text.includes('SELECT * FROM anchor_deposits WHERE id = $1')) {
+        return {
+          rows: [
+            {
+              id: 'dep-wallet-1',
+              deposit_type: 'wallet',
+              anchor_id: 'moneygram',
+              anchor_transaction_id: 'anchor-tx-fail',
+              anchor_asset: 'USDC',
+              anchor_amount: '50',
+              status: 'failed',
+              last_anchor_status: 'partially_failed',
+              last_error: 'Stellar transaction failed during anchor delivery',
+              interactive_url: 'https://anchor.example/flow',
+              completed_at: new Date(),
+            },
+          ],
+        };
+      }
+      return { rows: [] };
+    },
+    anchorServiceImpl: {
+      getAnchorById: () => ({ id: 'moneygram', assetCode: 'USDC' }),
+      publicAnchorInfo: anchor => anchor,
+      isAnchorConfigured: () => true,
+      getAnchorTransaction: async () => ({
+        transaction: {
+          status: 'partially_failed',
+          message: 'Stellar transaction failed during anchor delivery',
+        },
+      }),
+      isAnchorFailureStatus: status =>
+        [
+          'error',
+          'expired',
+          'no_market',
+          'too_small',
+          'too_large',
+          'refunded',
+          'partially_failed',
+        ].includes(status),
+    },
+  });
+
+  const response = await request(app)
+    .get('/api/anchor/deposits/dep-wallet-1')
+    .set('Authorization', 'Bearer token');
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.status, 'failed');
+  assert.equal(response.body.anchor_status, 'partially_failed');
+  assert.equal(response.body.last_error, 'Stellar transaction failed during anchor delivery');
+
+  // Verify users table was updated to mark wallet_funding_failed_at
+  const userFailureQuery = executedQueries.find(q =>
+    q.text.includes('UPDATE users SET wallet_funding_failed_at')
+  );
+  assert.ok(
+    userFailureQuery,
+    'Expected UPDATE users SET wallet_funding_failed_at query to be executed'
+  );
+  assert.deepEqual(userFailureQuery.params, ['user-1']);
+});
+
+test('GET /api/anchor/deposits/:id updates users.wallet_funded_at when wallet deposit completes', async () => {
+  const executedQueries = [];
+  const { app } = buildApp({
+    queryImpl: async (text, params) => {
+      executedQueries.push({ text, params });
+      if (text.includes('FROM anchor_deposits ad')) {
+        return {
+          rows: [
+            {
+              id: 'dep-wallet-2',
+              user_id: 'user-1',
+              deposit_type: 'wallet',
+              campaign_id: null,
+              anchor_id: 'moneygram',
+              anchor_transaction_id: 'anchor-tx-success',
+              anchor_asset: 'USDC',
+              anchor_amount: '100',
+              status: 'pending_anchor',
+              last_anchor_status: 'pending',
+              last_anchor_payload: {},
+              interactive_url: 'https://anchor.example/flow',
+              anchor_auth_token: 'auth-tok',
+              anchor_auth_expires_at: new Date(Date.now() + 60000),
+              wallet_public_key: 'GUSER',
+              wallet_secret_encrypted: 'encrypted',
+            },
+          ],
+        };
+      }
+      if (text.includes('UPDATE anchor_deposits')) {
+        return { rows: [] };
+      }
+      if (text.includes('UPDATE users SET wallet_funded_at')) {
+        return { rows: [] };
+      }
+      if (text.includes('SELECT * FROM anchor_deposits WHERE id = $1')) {
+        return {
+          rows: [
+            {
+              id: 'dep-wallet-2',
+              deposit_type: 'wallet',
+              anchor_id: 'moneygram',
+              anchor_transaction_id: 'anchor-tx-success',
+              anchor_asset: 'USDC',
+              anchor_amount: '100',
+              status: 'completed',
+              last_anchor_status: 'completed',
+              last_error: null,
+              interactive_url: 'https://anchor.example/flow',
+              completed_at: new Date(),
+            },
+          ],
+        };
+      }
+      return { rows: [] };
+    },
+    anchorServiceImpl: {
+      getAnchorById: () => ({ id: 'moneygram', assetCode: 'USDC' }),
+      publicAnchorInfo: anchor => anchor,
+      isAnchorConfigured: () => true,
+      getAnchorTransaction: async () => ({
+        transaction: {
+          status: 'completed',
+        },
+      }),
+    },
+  });
+
+  const response = await request(app)
+    .get('/api/anchor/deposits/dep-wallet-2')
+    .set('Authorization', 'Bearer token');
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.status, 'completed');
+
+  // Verify users table was updated to mark wallet_funded_at and clear wallet_funding_failed_at
+  const userSuccessQuery = executedQueries.find(q =>
+    q.text.includes('UPDATE users SET wallet_funded_at')
+  );
+  assert.ok(userSuccessQuery, 'Expected UPDATE users SET wallet_funded_at query to be executed');
+  assert.deepEqual(userSuccessQuery.params, ['user-1']);
 });

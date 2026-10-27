@@ -99,6 +99,13 @@ async function queueForDigest(userId, channel, message) {
   );
 }
 
+async function releaseQueuedRows(rowIds) {
+  if (!rowIds.length) return;
+  await db.query('UPDATE notification_queue SET flushed_at = NULL WHERE id = ANY($1::uuid[])', [
+    rowIds,
+  ]);
+}
+
 /**
  * Create a notification for a user and fan it out across every enabled channel.
  *
@@ -184,9 +191,13 @@ async function flushQuietHours(options = {}) {
   // single digest message per user/channel pair.
   const groups = new Map();
   const allFlushedIds = [];
+  const quietHourIds = [];
 
   for (const row of rows) {
-    if (inQuietHours(row, nowHour)) continue;
+    if (inQuietHours(row, nowHour)) {
+      quietHourIds.push(row.id);
+      continue;
+    }
 
     const key = `${row.user_id}:${row.channel}`;
     if (!groups.has(key)) {
@@ -212,6 +223,8 @@ async function flushQuietHours(options = {}) {
     });
   }
 
+  await releaseQueuedRows(quietHourIds);
+
   let deliveredCount = 0;
 
   for (const group of groups.values()) {
@@ -229,7 +242,16 @@ async function flushQuietHours(options = {}) {
     };
 
     try {
-      await deliverChannel(group.userId, group.channel, group.settings, digestMessage);
+      const delivered = await deliverChannel(
+        group.userId,
+        group.channel,
+        group.settings,
+        digestMessage
+      );
+      if (!delivered) {
+        await releaseQueuedRows(group.items.map(item => item.id));
+        continue;
+      }
       deliveredCount++;
     } catch (err) {
       logger.error('Failed to flush digest notification', {
@@ -237,6 +259,7 @@ async function flushQuietHours(options = {}) {
         channel: group.channel,
         error: err.message,
       });
+      await releaseQueuedRows(group.items.map(item => item.id));
     }
   }
 

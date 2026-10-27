@@ -1,5 +1,6 @@
 const db = require('../config/database');
 const logger = require('../config/logger');
+const { parsePagination } = require('../utils/pagination');
 
 async function upsertRecommendationsForUser(userId) {
   if (!userId) return [];
@@ -140,7 +141,7 @@ async function getRecommendedCampaigns(userId, options = {}) {
   try {
     await upsertRecommendationsForUser(userId);
 
-    const limit = Math.min(Number(options.limit || 6), 12);
+    const { limit } = parsePagination(options, { limit: 6, max: 12 });
     const { rows } = await db.query(
       `SELECT
          c.id,

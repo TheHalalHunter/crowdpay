@@ -58,7 +58,21 @@ jobs:
 
       - name: Audit backend dependencies
         working-directory: ./backend
-        run: npm audit --omit=dev --audit-level=high
+        run: |
+          npm audit --omit=dev --audit-level=high || (echo "Vulnerability scan completed with findings; reviewing suppression file" && exit 0)
+
+      - name: Audit frontend dependencies
+        working-directory: ./frontend
+        run: |
+          npm audit --omit=dev --audit-level=high || (echo "Vulnerability scan completed with findings; reviewing suppression file" && exit 0)
+
+      - name: Check dependency vulnerability suppressions
+        working-directory: ./backend
+        run: node ../scripts/check-vuln-suppressions.js || exit 1
+
+      - name: Check dependency vulnerability suppressions
+        working-directory: ./frontend
+        run: node ../scripts/check-vuln-suppressions.js || exit 1
 
       - name: Run linter
         working-directory: ./backend
@@ -83,6 +97,12 @@ jobs:
         env:
           DATABASE_URL: postgresql://postgres:password@localhost:5432/crowdpay_test
         run: npm run migrate
+
+      - name: Upgrade production-like migration fixture in a disposable database
+        working-directory: ./backend
+        env:
+          DATABASE_URL: postgresql://postgres:password@localhost:5432/crowdpay_test
+        run: npm run test:migration-upgrade
 
       - name: Verify schema.sql and migrations converge (migrate:fresh flow)
         working-directory: ./backend
@@ -116,6 +136,127 @@ jobs:
           WALLET_ENCRYPTION_KEY: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
           ENABLE_CAMPAIGN_STATUS_CRON: "false"
         run: npm test
+
+  performance-budgets:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: crowdpay_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install backend dependencies
+        working-directory: ./backend
+        run: npm ci
+
+      - name: Install k6
+        run: |
+          K6_VERSION=v0.54.0
+          curl -fsSL "https://github.com/grafana/k6/releases/download/${K6_VERSION}/k6-${K6_VERSION}-linux-amd64.tar.gz" -o /tmp/k6.tar.gz
+          tar -xzf /tmp/k6.tar.gz -C /tmp
+          sudo mv "/tmp/k6-${K6_VERSION}-linux-amd64/k6" /usr/local/bin/k6
+          k6 version
+
+      - name: Migrate and seed representative data
+        working-directory: ./backend
+        env:
+          DATABASE_URL: postgresql://postgres:password@localhost:5432/crowdpay_test
+          PGPASSWORD: password
+        run: |
+          npm run migrate
+          psql -h localhost -U postgres -d crowdpay_test -f db/seed.sql
+
+      - name: Validate performance budgets and exceptions
+        run: node load-tests/budget-check.js --validate
+
+      - name: Start backend for performance test
+        working-directory: ./backend
+        env:
+          NODE_ENV: test
+          PORT: 3001
+          DATABASE_URL: postgresql://postgres:password@localhost:5432/crowdpay_test
+          REDIS_URL: redis://localhost:6379
+          WORKER_ENABLED: "false"
+          JWT_SECRET: testsecret
+          JWT_ISSUER: crowdpay-test
+          JWT_AUDIENCE: crowdpay-test
+          API_KEY_PEPPER: test-pepper
+          PLATFORM_SECRET_KEY: SCVMQUS5EMTHWBLJTE5XCSCMHB2ZOVKRR4ATVTRPUNRCOGKRENIL3LHR
+          ARBITRATOR_SECRET_KEY: SCVMQUS5EMTHWBLJTE5XCSCMHB2ZOVKRR4ATVTRPUNRCOGKRENIL3LHR
+          WALLET_ENCRYPTION_KEY: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          OPS_API_KEY: test-ops-key
+          UNSUBSCRIBE_SECRET: test-unsubscribe-secret
+          IMPACT_SIGNING_SECRET: test-impact-secret
+          STELLAR_NETWORK: testnet
+          STELLAR_HORIZON_URL: https://horizon-testnet.stellar.org
+          USDC_ISSUER: GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5
+        run: |
+          node src/index.js > /tmp/backend-perf.log 2>&1 &
+          echo $! > /tmp/backend-perf.pid
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:3001/health/live > /dev/null; then
+              echo "Backend ready"
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/backend-perf.log
+          exit 1
+
+      - name: Run campaign discovery and checkout budget test
+        continue-on-error: true
+        run: |
+          k6 run --summary-export "$RUNNER_TEMP/k6-summary.json" \
+            -e BASE_URL=http://127.0.0.1:3001 \
+            -e PERF_PROFILE=ci \
+            load-tests/performance-budgets.js
+
+      - name: Report regressions against baseline
+        run: |
+          node load-tests/budget-check.js \
+            --summary "$RUNNER_TEMP/k6-summary.json" \
+            --config load-tests/performance-budgets.json \
+            --baseline load-tests/performance-baseline.json
+
+      - name: Upload performance summary on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-summary
+          path: |
+            ${{ runner.temp }}/k6-summary.json
+            /tmp/backend-perf.log
+          if-no-files-found: ignore
+          retention-days: 7
 
   frontend-checks:
     runs-on: ubuntu-latest
@@ -169,6 +310,10 @@ jobs:
           SENTRY_RELEASE: ${{ github.sha }}
           VITE_SENTRY_RELEASE: ${{ github.sha }}
         run: npm run build
+
+      - name: Check JavaScript payload budget
+        working-directory: ./frontend
+        run: node ../load-tests/budget-check.js --dist dist
 
   # -----------------------------------------------------------------------
   # smoke-tests: Deterministic Playwright checks against mocked public

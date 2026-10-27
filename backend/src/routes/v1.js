@@ -6,6 +6,7 @@ const { requireAuth } = require('../middleware/auth');
 const { refreshCampaignStatus } = require('../services/campaignStatusService');
 const { recordContributionFromTxHash } = require('../services/v1ContributionService');
 const { getCampaignsValidation, validateRequest } = require('../middleware/validation');
+const { parsePagination } = require('../utils/pagination');
 const asyncHandler = require('../utils/asyncHandler');
 
 const router = express.Router();
@@ -97,8 +98,7 @@ router.get(
   validateRequest,
   asyncHandler(async (req, res) => {
     const { search, status, asset, sort = 'newest' } = req.query;
-    const limit = Math.min(Number(req.query.limit || 20), 100);
-    const offset = Math.max(Number(req.query.offset || 0), 0);
+    const { limit, offset } = parsePagination(req.query, { limit: 20, max: 100 });
     const filters = ['c.deleted_at IS NULL'];
     const params = [];
 
@@ -235,8 +235,7 @@ router.get(
   requireAuth,
   asyncHandler(async (req, res) => {
     await assertCampaignCreator(req, req.params.id);
-    const limit = Math.min(Number(req.query.limit || 50), 200);
-    const offset = Math.max(Number(req.query.offset || 0), 0);
+    const { limit, offset } = parsePagination(req.query, { limit: 50, max: 200 });
 
     const { rows } = await db.query(
       `SELECT id, campaign_id, sender_public_key, amount, asset, payment_type,

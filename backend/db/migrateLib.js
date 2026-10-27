@@ -79,9 +79,24 @@ async function loadApplied(client) {
   return rows;
 }
 
+const MIGRATION_ADVISORY_LOCK_KEY = 894721;
+
+async function acquireMigrationLock(client, lockKey = MIGRATION_ADVISORY_LOCK_KEY) {
+  await client.query('SELECT pg_advisory_lock($1)', [lockKey]);
+  return true;
+}
+
+async function releaseMigrationLock(client, lockKey = MIGRATION_ADVISORY_LOCK_KEY) {
+  const { rows } = await client.query('SELECT pg_advisory_unlock($1) AS unlocked', [lockKey]);
+  return rows && rows[0] ? rows[0].unlocked : true;
+}
+
 module.exports = {
   MIGRATIONS_DIR,
   DOWN_SUFFIX,
+  MIGRATION_ADVISORY_LOCK_KEY,
+  acquireMigrationLock,
+  releaseMigrationLock,
   isUpMigration,
   sha256,
   listUpMigrationFilenames,

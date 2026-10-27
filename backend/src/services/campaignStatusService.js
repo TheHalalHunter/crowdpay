@@ -1,6 +1,7 @@
 const db = require('../config/database');
 const logger = require('../config/logger');
 const { triggerCampaignStatusActions } = require('./campaignStatusActions');
+const { logAuditEvent } = require('./auditService');
 
 /** Postgres advisory lock id — serializes batch status refresh across cron instances. */
 const CAMPAIGN_STATUS_REFRESH_LOCK_KEY = 323001;
@@ -57,6 +58,36 @@ function logTransition(campaign, oldStatus) {
   });
 }
 
+async function auditCampaignTransition(campaign, oldStatus, source, client) {
+  try {
+    await logAuditEvent({
+      actorId: null,
+      action: 'campaign.status_changed',
+      resourceType: 'campaign',
+      resourceId: campaign.id,
+      before: { status: oldStatus },
+      after: { status: campaign.status },
+      metadata: {
+        creator_id: campaign.creator_id,
+        raised_amount: String(campaign.raised_amount),
+        target_amount: String(campaign.target_amount),
+        backer_count: Number(campaign.backer_count),
+        deadline: campaign.deadline,
+        transition_source: source,
+      },
+      source,
+      client,
+    });
+  } catch (err) {
+    logger.error('Campaign status audit event failed', {
+      campaign_id: campaign.id,
+      old_status: oldStatus,
+      new_status: campaign.status,
+      error: err.message,
+    });
+  }
+}
+
 /**
  * Reconcile status for one campaign (active → funded or failed based on goal/deadline).
  * Uses a single atomic UPDATE so concurrent callers cannot both observe and transition active rows.
@@ -75,6 +106,7 @@ async function refreshCampaignStatus(campaignId, client) {
   const transitioned = rows[0] || null;
   if (transitioned) {
     logTransition(transitioned, 'active');
+    await auditCampaignTransition(transitioned, 'active', 'system:campaign_status_refresh', client);
     await triggerCampaignStatusActions(transitioned, 'active');
   }
 
@@ -114,10 +146,12 @@ async function refreshActiveCampaignStatuses() {
     if (funded.length || failed.length) {
       for (const campaign of funded) {
         logTransition(campaign, 'active');
+        await auditCampaignTransition(campaign, 'active', 'system:campaign_status_batch', client);
         await triggerCampaignStatusActions(campaign, 'active');
       }
       for (const campaign of failed) {
         logTransition(campaign, 'active');
+        await auditCampaignTransition(campaign, 'active', 'system:campaign_status_batch', client);
         await triggerCampaignStatusActions(campaign, 'active');
       }
 

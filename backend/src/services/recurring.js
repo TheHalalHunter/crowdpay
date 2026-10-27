@@ -215,6 +215,7 @@ async function submitSubscription({
   amountPerPeriod,
   periodMonths,
   totalPeriods,
+  idempotencyKey = null,
 }) {
   const input = validateSubscriptionInput({
     amountPerPeriod: amountPerPeriod,
@@ -251,6 +252,26 @@ async function submitSubscription({
       400,
       'UNSUPPORTED_WALLET_TYPE'
     );
+  }
+
+  if (idempotencyKey) {
+    const { rows: existingRows } = await db.query(
+      `SELECT id FROM subscriptions
+        WHERE idempotency_actor_id = $1 AND idempotency_key = $2`,
+      [userId, idempotencyKey]
+    );
+    if (existingRows.length) {
+      const { rows: balanceRows } = await db.query(
+        `SELECT stellar_balance_id FROM subscription_balances
+          WHERE subscription_id = $1 ORDER BY scheduled_date ASC`,
+        [existingRows[0].id]
+      );
+      return {
+        subscriptionId: existingRows[0].id,
+        balanceIds: balanceRows.map(row => row.stellar_balance_id),
+        replayed: true,
+      };
+    }
   }
 
   const tx = TransactionBuilder.fromXDR(unsignedXdr, networkPassphrase);
@@ -292,10 +313,20 @@ async function submitSubscription({
     subscriptionId = await withTransaction(async client => {
       const { rows: inserted } = await client.query(
         `INSERT INTO subscriptions
-        (campaign_id, contributor_user_id, amount_per_period, asset, period_months, total_periods)
-      VALUES ($1, $2, $3, $4, $5, $6)
+        (campaign_id, contributor_user_id, amount_per_period, asset, period_months, total_periods,
+         idempotency_actor_id, idempotency_key)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
       RETURNING id`,
-        [campaignId, userId, input.amount, asset, input.periodMonths, input.totalPeriods]
+        [
+          campaignId,
+          userId,
+          input.amount,
+          asset,
+          input.periodMonths,
+          input.totalPeriods,
+          userId,
+          idempotencyKey,
+        ]
       );
       const createdSubscriptionId = inserted[0].id;
 

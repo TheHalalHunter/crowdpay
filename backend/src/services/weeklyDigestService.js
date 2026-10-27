@@ -253,11 +253,12 @@ function buildCampaignDigest({
 }
 
 async function recordDigestDelivery({ userId, windowStart, windowEnd, campaignCount, itemCount }) {
-  await db.query(
+  const { rows } = await db.query(
     `INSERT INTO email_digest_deliveries
        (user_id, category, window_started_at, window_ended_at, campaign_count, item_count)
      VALUES ($1, $2, $3, $4, $5, $6)
-     ON CONFLICT (user_id, category, window_ended_at) DO NOTHING`,
+     ON CONFLICT (user_id, category, window_ended_at) DO NOTHING
+     RETURNING id`,
     [
       userId,
       DIGEST_CATEGORY,
@@ -266,6 +267,15 @@ async function recordDigestDelivery({ userId, windowStart, windowEnd, campaignCo
       campaignCount,
       itemCount,
     ]
+  );
+  return rows.length > 0;
+}
+
+async function releaseDigestDelivery({ userId, windowEnd }) {
+  await db.query(
+    `DELETE FROM email_digest_deliveries
+     WHERE user_id = $1 AND category = $2 AND window_ended_at = $3`,
+    [userId, DIGEST_CATEGORY, windowEnd.toISOString()]
   );
 }
 
@@ -336,23 +346,32 @@ async function sendWeeklyContributorDigests({ runAt = new Date() } = {}) {
       0
     );
 
-    await sendWeeklyDigestEmail({
-      to: recipient.email,
-      userId: recipient.id,
-      windowEnd,
-      name: recipient.name,
-      windowLabel: buildWindowLabel(windowStart, windowEnd),
-      digestUrl,
-      campaigns: digestCampaigns,
-    });
-
-    await recordDigestDelivery({
+    const claimed = await recordDigestDelivery({
       userId: recipient.id,
       windowStart,
       windowEnd,
       campaignCount: digestCampaigns.length,
       itemCount,
     });
+    if (!claimed) {
+      skipped += 1;
+      continue;
+    }
+
+    try {
+      await sendWeeklyDigestEmail({
+        to: recipient.email,
+        userId: recipient.id,
+        windowEnd,
+        name: recipient.name,
+        windowLabel: buildWindowLabel(windowStart, windowEnd),
+        digestUrl,
+        campaigns: digestCampaigns,
+      });
+    } catch (err) {
+      await releaseDigestDelivery({ userId: recipient.id, windowEnd });
+      throw err;
+    }
 
     sent += 1;
   }

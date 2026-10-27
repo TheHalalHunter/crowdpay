@@ -12,6 +12,7 @@
     "format:check": "node ../scripts/format-check.js",
     "test": "node scripts/run-tests.js",
     "migrate": "node db/migrate.js up",
+    "test:migration-upgrade": "node db/migration-integration-test.js",
     "verify-schema": "node db/verify-schema-convergence.js",
     "migrate:status": "node db/migrate.js status",
     "migrate:down": "node db/migrate.js down",

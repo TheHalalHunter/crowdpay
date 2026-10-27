@@ -10,7 +10,9 @@
     "test:e2e": "npx playwright test",
     "test:public": "npx playwright test --config playwright.public.config.js",
     "load-test": "k6 run load-tests/*.js",
-    "prepare": "husky"
+    "prepare": "husky",
+    "csp:generate": "node scripts/generate-csp.js --write",
+    "csp:check": "node scripts/generate-csp.js --check"
   },
   "devDependencies": {
     "@playwright/test": "^1.63.0",

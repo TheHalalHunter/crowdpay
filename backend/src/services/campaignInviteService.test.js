@@ -470,4 +470,19 @@ test.describe('campaignInviteService', () => {
       'http://localhost:5173/campaigns/c-1/invite/tok'
     );
   });
+
+  test('buildInviteUrl preserves a frontend path without duplicate slashes', () => {
+    const original = process.env.FRONTEND_URL;
+    process.env.FRONTEND_URL = 'https://crowdpay.test/app/';
+    try {
+      const svc = buildService();
+      assert.equal(
+        svc.buildInviteUrl('c-1', 'tok'),
+        'https://crowdpay.test/app/campaigns/c-1/invite/tok'
+      );
+    } finally {
+      if (original === undefined) delete process.env.FRONTEND_URL;
+      else process.env.FRONTEND_URL = original;
+    }
+  });
 });

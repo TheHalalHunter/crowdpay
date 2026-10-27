@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "captured_at": "2026-10-20T00:00:00.000Z",
+  "source": "Seeded CI dataset (backend/db/seed.sql), PERF_PROFILE=ci",
+  "metrics": {
+    "campaign_discovery": {
+      "p95_ms": 250,
+      "p99_ms": 700,
+      "error_rate": 0
+    },
+    "contribution_checkout": {
+      "p95_ms": 300,
+      "p99_ms": 900,
+      "error_rate": 0
+    }
+  }
+}

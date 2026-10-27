@@ -22,14 +22,43 @@ const DISCREPANCY_EPSILON = 0.0000001;
  * hour (#901). The contract's own `get_total_raised` is the source of truth
  * there, exactly as `campaignStatusActions.syncSorobanStatus` already assumes.
  */
-async function readLiveCampaignBalance(campaign) {
+async function getQuarantinedAmount(campaignId, assetType, dbClient = db) {
+  try {
+    const { rows } = await dbClient.query(
+      `SELECT COALESCE(SUM(amount), 0) AS total
+       FROM quarantined_payments
+       WHERE campaign_id = $1 AND asset_code = $2`,
+      [campaignId, assetType]
+    );
+    return parseFloat(rows[0]?.total || '0');
+  } catch (err) {
+    if (err.code === '42P01') return 0;
+    throw err;
+  }
+}
+
+async function readLiveCampaignBalance(campaign, dbClient = db) {
   if (campaign.escrow_contract_id) {
     const totalRaisedStroops = await getEscrowTotalRaised(campaign.escrow_contract_id);
     return parseFloat(fromStroops(totalRaisedStroops || 0));
   }
 
   const onChain = await getCampaignBalance(campaign.wallet_public_key);
-  return parseFloat(onChain[campaign.asset_type] || '0');
+  const rawBalance = parseFloat(onChain[campaign.asset_type] || '0');
+
+  // Prevent reconciliation jobs from processing quarantined payments (#1092).
+  // Quarantined payments sit on-chain in the wallet account but must never be credited.
+  const quarantinedAmount = await getQuarantinedAmount(campaign.id, campaign.asset_type, dbClient);
+  if (quarantinedAmount > 0) {
+    logger.info('[reconcile] Deducted quarantined payments from campaign live balance', {
+      campaign_id: campaign.id,
+      asset_type: campaign.asset_type,
+      raw_balance: rawBalance,
+      quarantined_amount: quarantinedAmount,
+    });
+  }
+
+  return Math.max(0, rawBalance - quarantinedAmount);
 }
 
 function getReconciliationAlertThreshold() {
@@ -244,4 +273,5 @@ module.exports = {
   getRecentReconciliationRuns,
   recordReconciliationRun,
   readLiveCampaignBalance,
+  getQuarantinedAmount,
 };

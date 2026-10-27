@@ -6,9 +6,10 @@
  * @param {number}  [defaults.max=100]   Hard upper-bound
  * @returns {{ limit: number, offset: number }}
  */
-function parsePagination(query, { limit: defaultLimit = 20, max: maxLimit = 100 } = {}) {
-  const limit = Math.min(Math.max(parseInt(query.limit, 10) || defaultLimit, 1), maxLimit);
-  const offset = Math.max(parseInt(query.offset, 10) || 0, 0);
+function parsePagination(query = {}, { limit: defaultLimit = 20, max: maxLimit = 100 } = {}) {
+  const q = query || {};
+  const limit = Math.min(Math.max(parseInt(q.limit, 10) || defaultLimit, 1), maxLimit);
+  const offset = Math.max(parseInt(q.offset, 10) || 0, 0);
   return { limit, offset };
 }
 

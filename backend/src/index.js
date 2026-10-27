@@ -51,6 +51,10 @@ app.use('/api/anchor/callbacks', express.raw({ type: () => true, limit: '1mb' })
 
 app.use(express.json({ limit: '1mb' }));
 app.use(cookieParser());
+// CSP reports are sent by browsers without cookies or CSRF tokens, so mount
+// this collector before the CSRF guard. The route has its own body parser and
+// per-IP rate limit.
+app.use('/api/csp-report', require('./routes/cspReports'));
 app.use(require('./middleware/csrf').csrfProtection);
 
 app.use('/api/v1', require('./routes/v1'));

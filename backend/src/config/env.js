@@ -19,6 +19,23 @@ const REQUIRED = [
 ];
 const STORAGE_VARS = ['STORAGE_BUCKET', 'STORAGE_ENDPOINT'];
 
+function getMissingConfig() {
+  const missing = REQUIRED.filter(key => !process.env[key]);
+  const storageConfigured = STORAGE_VARS.some(key => !!process.env[key]);
+  if (storageConfigured) {
+    missing.push(...STORAGE_VARS.filter(key => !process.env[key]));
+  }
+  if (
+    process.env.NODE_ENV === 'production' &&
+    String(process.env.DISABLE_EMAILS || '').toLowerCase() !== 'true' &&
+    !process.env.SMTP_HOST &&
+    !process.env.EMAIL_SERVICE_API_KEY
+  ) {
+    missing.push('SMTP_HOST|EMAIL_SERVICE_API_KEY');
+  }
+  return [...new Set(missing)];
+}
+
 function validateEnv() {
   const missing = REQUIRED.filter(key => !process.env[key]);
   const errors = [];
@@ -144,4 +161,4 @@ function validateEnv() {
   }
 }
 
-module.exports = { validateEnv };
+module.exports = { validateEnv, getMissingConfig, REQUIRED };

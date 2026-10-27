@@ -300,8 +300,8 @@ class HorizonIngestionWorker {
       if (this.paymentHandler) {
         await this.paymentHandler(campaignId, walletPublicKey, record);
       } else {
-        const { handlePayment } = require('./ledgerMonitor');
-        await handlePayment(campaignId, walletPublicKey, record);
+        const { onPaymentRecord } = require('./ledgerMonitor');
+        await onPaymentRecord(campaignId, walletPublicKey, record);
       }
 
       this.metrics.processed_count++;

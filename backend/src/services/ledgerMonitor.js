@@ -105,15 +105,69 @@ async function loadCursor(campaignId) {
 
 async function saveCursor(campaignId, walletPublicKey, cursorToken) {
   if (!cursorToken) return;
-  await db.query(
-    `INSERT INTO ledger_stream_cursors (campaign_id, wallet_public_key, last_cursor, updated_at)
-     VALUES ($1, $2, $3, NOW())
+  await saveCheckpoint(db, campaignId, walletPublicKey, { cursorToken });
+}
+
+async function saveCheckpoint(runner, campaignId, walletPublicKey, metadata = {}) {
+  if (!metadata.cursorToken) return;
+  await runner.query(
+    `INSERT INTO ledger_stream_cursors
+       (campaign_id, wallet_public_key, last_cursor, last_ledger_sequence, last_event_key,
+        state, gap_detected, last_error, updated_at)
+     VALUES ($1, $2, $3, $4, $5, 'running', $6, NULL, NOW())
      ON CONFLICT (campaign_id) DO UPDATE
-     SET last_cursor = EXCLUDED.last_cursor,
-         wallet_public_key = EXCLUDED.wallet_public_key,
-         updated_at = NOW()`,
-    [campaignId, walletPublicKey, String(cursorToken)]
+       SET last_cursor = EXCLUDED.last_cursor,
+           wallet_public_key = EXCLUDED.wallet_public_key,
+           last_ledger_sequence = COALESCE(EXCLUDED.last_ledger_sequence, ledger_stream_cursors.last_ledger_sequence),
+           last_event_key = COALESCE(EXCLUDED.last_event_key, ledger_stream_cursors.last_event_key),
+           state = 'running', gap_detected = ledger_stream_cursors.gap_detected OR EXCLUDED.gap_detected,
+           last_error = NULL, updated_at = NOW()`,
+    [
+      campaignId,
+      walletPublicKey,
+      String(metadata.cursorToken),
+      metadata.ledgerSequence || null,
+      metadata.eventKey || null,
+      Boolean(metadata.gapDetected),
+    ]
   );
+}
+
+async function loadCheckpoint(campaignId) {
+  const { rows } = await db.query(
+    `SELECT last_cursor, last_ledger_sequence, last_event_key, gap_detected
+       FROM ledger_stream_cursors WHERE campaign_id = $1`,
+    [campaignId]
+  );
+  return rows[0] || null;
+}
+
+async function detectOrdering(campaignId, record, eventKey) {
+  const observed = Number(record?.ledger || record?.ledger_sequence || record?.ledgerSequence);
+  if (!Number.isSafeInteger(observed) || observed <= 0) return false;
+  const checkpoint = await loadCheckpoint(campaignId);
+  const previous = Number(checkpoint?.last_ledger_sequence);
+  if (!Number.isSafeInteger(previous) || observed === previous || observed === previous + 1) {
+    return false;
+  }
+  const alertType = observed < previous ? 'reordered' : 'gap';
+  await db.query(
+    `INSERT INTO ledger_stream_alerts
+       (campaign_id, alert_type, expected_sequence, observed_sequence, event_key, details)
+     VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
+    [
+      campaignId,
+      alertType,
+      previous + 1,
+      observed,
+      eventKey,
+      JSON.stringify({
+        actionable: true,
+        message: alertType === 'gap' ? 'Request a bounded backfill' : 'Inspect stream ordering',
+      }),
+    ]
+  );
+  return true;
 }
 
 function registrySet(walletPublicKey, patch) {
@@ -178,11 +232,26 @@ async function replayMissedPayments(campaignId, walletPublicKey) {
  */
 async function onPaymentRecord(campaignId, walletPublicKey, record) {
   const token = extractPagingToken(record);
+  const ledgerSequence = Number(
+    record?.ledger || record?.ledger_sequence || record?.ledgerSequence
+  );
+  const eventKey = token || record?.transaction_hash;
   try {
-    await handlePayment(campaignId, walletPublicKey, record);
+    const gapDetected = await detectOrdering(campaignId, record, eventKey);
+    await handlePayment(campaignId, walletPublicKey, record, {
+      cursorToken: token,
+      eventKey,
+      ledgerSequence: Number.isSafeInteger(ledgerSequence) ? ledgerSequence : null,
+      gapDetected,
+    });
     if (token) {
       try {
-        await saveCursor(campaignId, walletPublicKey, token);
+        await saveCheckpoint(db, campaignId, walletPublicKey, {
+          cursorToken: token,
+          eventKey,
+          ledgerSequence: Number.isSafeInteger(ledgerSequence) ? ledgerSequence : null,
+          gapDetected,
+        });
       } catch (e) {
         logger.error('Failed to persist ledger cursor', {
           wallet_public_key: walletPublicKey,
@@ -280,7 +349,7 @@ async function quarantinePayment({
   });
 }
 
-async function handlePayment(campaignId, walletPublicKey, payment) {
+async function handlePayment(campaignId, walletPublicKey, payment, eventMetadata = {}) {
   if (payment.to !== walletPublicKey) return;
   if (payment.type !== 'payment' && payment.type !== 'path_payment_strict_receive') return;
 
@@ -346,6 +415,7 @@ async function handlePayment(campaignId, walletPublicKey, payment) {
     conversionRate,
     txHash,
     walletMode: campaignRows[0].wallet_mode,
+    eventMetadata,
   });
 }
 
@@ -371,22 +441,47 @@ async function recordConfirmedContribution({
   conversionRate = null,
   txHash,
   walletMode = null,
+  eventMetadata = {},
 }) {
   const client = await db.connect();
   let postCommitHooks = null;
   try {
+    await client.query('BEGIN');
+    if (eventMetadata.eventKey) {
+      const receipt = await client.query(
+        `INSERT INTO ledger_event_receipts
+           (campaign_id, event_key, transaction_hash, ledger_sequence, paging_token)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (campaign_id, event_key) DO NOTHING
+         RETURNING event_key`,
+        [
+          campaignId,
+          String(eventMetadata.eventKey),
+          txHash,
+          eventMetadata.ledgerSequence || null,
+          eventMetadata.cursorToken || null,
+        ]
+      );
+      if (!receipt.rows.length) {
+        await saveCheckpoint(client, campaignId, walletPublicKey, eventMetadata);
+        await client.query('COMMIT');
+        return;
+      }
+    }
     const existing = await client.query('SELECT id FROM contributions WHERE tx_hash = $1', [
       txHash,
     ]);
-    if (existing.rows.length > 0) return;
+    if (existing.rows.length > 0) {
+      await saveCheckpoint(client, campaignId, walletPublicKey, eventMetadata);
+      await client.query('COMMIT');
+      return;
+    }
 
     const { rows: txRows } = await client.query(
       `SELECT metadata FROM stellar_transactions WHERE tx_hash = $1 AND kind = 'contribution'`,
       [txHash]
     );
     const platformFeeAmount = txRows[0]?.metadata?.platform_fee_amount ?? null;
-
-    await client.query('BEGIN');
 
     const { rows: creatorRows } = await client.query(
       'SELECT creator_id, title FROM campaigns WHERE id = $1',
@@ -554,6 +649,9 @@ async function recordConfirmedContribution({
       'SELECT raised_amount, status FROM campaigns WHERE id = $1',
       [campaignId]
     );
+
+    // The contribution effect and its stream checkpoint commit together.
+    await saveCheckpoint(client, campaignId, walletPublicKey, eventMetadata);
 
     await client.query('COMMIT');
     postCommitHooks = {
@@ -930,7 +1028,9 @@ async function getLedgerStreamHealth() {
 
   const { rows: dbCursors } = await db.query(
     `SELECT c.id AS campaign_id, c.wallet_public_key, c.status AS campaign_status,
-            lc.last_cursor, lc.updated_at AS cursor_updated_at
+            lc.last_cursor, lc.last_ledger_sequence, lc.last_event_key,
+            lc.gap_detected, lc.state AS cursor_state, lc.last_error,
+            lc.updated_at AS cursor_updated_at
      FROM campaigns c
      LEFT JOIN ledger_stream_cursors lc ON lc.campaign_id = c.id
      WHERE c.status IN ('active', 'funded')`
@@ -948,6 +1048,11 @@ async function getLedgerStreamHealth() {
       wallet_public_key: row.wallet_public_key,
       campaign_status: row.campaign_status,
       last_cursor: row.last_cursor || workerStream?.last_cursor || null,
+      last_ledger_sequence: row.last_ledger_sequence || null,
+      last_event_key: row.last_event_key || null,
+      gap_detected: Boolean(row.gap_detected),
+      cursor_state: row.cursor_state || 'unknown',
+      cursor_error: row.last_error || null,
       cursor_updated_at: row.cursor_updated_at || null,
       stream_state: streamState,
       stream_opened_at: live.opened_at || null,
@@ -980,6 +1085,125 @@ async function getLedgerStreamHealth() {
   };
 }
 
+async function listLedgerCheckpoints(campaignId = null) {
+  const params = campaignId ? [campaignId] : [];
+  const where = campaignId ? 'WHERE lsc.campaign_id = $1' : '';
+  const { rows } = await db.query(
+    `SELECT lsc.campaign_id, lsc.wallet_public_key, lsc.last_cursor,
+            lsc.last_ledger_sequence, lsc.last_event_key, lsc.state,
+            lsc.gap_detected, lsc.last_error, lsc.updated_at
+       FROM ledger_stream_cursors lsc ${where}
+      ORDER BY lsc.updated_at DESC`,
+    params
+  );
+  return rows;
+}
+
+async function listLedgerAlerts(campaignId = null) {
+  const params = campaignId ? [campaignId] : [];
+  const where = campaignId ? 'WHERE campaign_id = $1' : '';
+  const { rows } = await db.query(
+    `SELECT id, campaign_id, alert_type, expected_sequence, observed_sequence,
+            event_key, details, status, created_at, resolved_at
+       FROM ledger_stream_alerts ${where}
+      ORDER BY created_at DESC LIMIT 200`,
+    params
+  );
+  return rows;
+}
+
+/** Run a bounded, operator-requested replay and persist its progress. */
+async function requestBoundedBackfill({
+  campaignId,
+  walletPublicKey,
+  fromCursor,
+  toCursor = null,
+  maxEvents = 1000,
+  requestedBy = null,
+}) {
+  const boundedMax = Math.max(1, Math.min(10000, Number(maxEvents) || 0));
+  if (!campaignId || !fromCursor || !boundedMax) {
+    const error = new Error('campaignId, fromCursor, and maxEvents are required');
+    error.statusCode = 400;
+    throw error;
+  }
+  if (!walletPublicKey) {
+    const { rows } = await db.query('SELECT wallet_public_key FROM campaigns WHERE id = $1', [
+      campaignId,
+    ]);
+    walletPublicKey = rows[0]?.wallet_public_key;
+  }
+  if (!walletPublicKey) {
+    const error = new Error('Campaign wallet not found');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const { rows: inserted } = await db.query(
+    `INSERT INTO ledger_backfill_requests
+       (campaign_id, requested_by, from_cursor, to_cursor, max_events, status, started_at)
+     VALUES ($1, $2, $3, $4, $5, 'running', NOW())
+     RETURNING id`,
+    [campaignId, requestedBy, String(fromCursor), toCursor ? String(toCursor) : null, boundedMax]
+  );
+  const requestId = inserted[0].id;
+  let cursor = String(fromCursor);
+  let processed = 0;
+  let replayed = 0;
+  try {
+    while (processed < boundedMax) {
+      const page = await server
+        .payments()
+        .forAccount(walletPublicKey)
+        .cursor(cursor)
+        .order('asc')
+        .limit(Math.min(100, boundedMax - processed))
+        .call();
+      const records = page.records || [];
+      if (!records.length) break;
+      for (const record of records) {
+        await onPaymentRecord(campaignId, walletPublicKey, record);
+        processed += 1;
+        replayed += 1;
+        const token = extractPagingToken(record);
+        if (toCursor && token === String(toCursor)) break;
+        if (processed >= boundedMax) break;
+      }
+      const pageToken = page.paging_token || extractPagingToken(records[records.length - 1]);
+      if (
+        !pageToken ||
+        pageToken === cursor ||
+        (toCursor && records.some(r => extractPagingToken(r) === String(toCursor)))
+      )
+        break;
+      cursor = String(pageToken);
+      if (records.length < 100) break;
+    }
+    await db.query(
+      `UPDATE ledger_backfill_requests
+          SET status = 'completed', processed_events = $1, replayed_events = $2,
+              completed_at = NOW()
+        WHERE id = $3`,
+      [processed, replayed, requestId]
+    );
+    return {
+      id: requestId,
+      status: 'completed',
+      processedEvents: processed,
+      replayedEvents: replayed,
+    };
+  } catch (err) {
+    await db.query(
+      `UPDATE ledger_backfill_requests
+          SET status = 'failed', processed_events = $1, replayed_events = $2,
+              error_message = $3, completed_at = NOW()
+        WHERE id = $4`,
+      [processed, replayed, err.message, requestId]
+    );
+    throw err;
+  }
+}
+
 module.exports = {
   startLedgerMonitor,
   watchCampaignWallet,
@@ -987,6 +1211,10 @@ module.exports = {
   recordConfirmedContribution,
   reconcileCampaignBalances: runBalanceReconciliation,
   getLedgerStreamHealth,
+  listLedgerCheckpoints,
+  listLedgerAlerts,
+  requestBoundedBackfill,
+  onPaymentRecord,
   addSSEClient,
   removeSSEClient,
   cleanupStreamForWallet,

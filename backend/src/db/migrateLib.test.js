@@ -12,7 +12,11 @@ const {
   listAllMigrationFilenames,
   listUpMigrationFilenames,
   MIGRATIONS_DIR,
+  acquireMigrationLock,
+  releaseMigrationLock,
+  MIGRATION_ADVISORY_LOCK_KEY,
 } = require('../../db/migrateLib');
+const { runUp } = require('../../db/migrate');
 
 test('isUpMigration excludes .down.sql rollback scripts', () => {
   assert.equal(isUpMigration('20260401_users.sql'), true);
@@ -84,4 +88,117 @@ test('validateMigrationFiles rejects an unsupported extension before running any
   } finally {
     fs.rmSync(stray, { force: true });
   }
+});
+
+test('acquireMigrationLock acquires the advisory lock with the dedicated migration lock key', async () => {
+  const queries = [];
+  const mockClient = {
+    query: async (text, params) => {
+      queries.push({ text, params });
+      return { rows: [] };
+    },
+  };
+
+  const res = await acquireMigrationLock(mockClient);
+  assert.equal(res, true);
+  assert.equal(queries.length, 1);
+  assert.equal(queries[0].text, 'SELECT pg_advisory_lock($1)');
+  assert.deepEqual(queries[0].params, [MIGRATION_ADVISORY_LOCK_KEY]);
+});
+
+test('releaseMigrationLock releases the advisory lock with the dedicated migration lock key', async () => {
+  const queries = [];
+  const mockClient = {
+    query: async (text, params) => {
+      queries.push({ text, params });
+      return { rows: [{ unlocked: true }] };
+    },
+  };
+
+  const res = await releaseMigrationLock(mockClient);
+  assert.equal(res, true);
+  assert.equal(queries.length, 1);
+  assert.equal(queries[0].text, 'SELECT pg_advisory_unlock($1) AS unlocked');
+  assert.deepEqual(queries[0].params, [MIGRATION_ADVISORY_LOCK_KEY]);
+});
+
+test('runUp releases advisory lock after a failed migration', async () => {
+  const queries = [];
+  let unlockCalled = false;
+
+  const mockClient = {
+    query: async text => {
+      queries.push(text);
+      if (text.includes('pg_advisory_lock')) {
+        return { rows: [] };
+      }
+      if (text.includes('pg_advisory_unlock')) {
+        unlockCalled = true;
+        return { rows: [{ unlocked: true }] };
+      }
+      if (text.includes('CREATE TABLE IF NOT EXISTS schema_migrations')) {
+        return { rows: [] };
+      }
+      if (text.includes('SELECT filename, file_hash, applied_at FROM schema_migrations')) {
+        return { rows: [] };
+      }
+      if (text === 'BEGIN') {
+        return { rows: [] };
+      }
+      if (text === 'ROLLBACK') {
+        return { rows: [] };
+      }
+      // Simulate failure on migration statement
+      throw new Error('Simulated syntax error in migration SQL');
+    },
+  };
+
+  await assert.rejects(async () => {
+    await runUp(mockClient);
+  }, /Simulated syntax error in migration SQL/);
+
+  assert.equal(
+    unlockCalled,
+    true,
+    'pg_advisory_unlock must be called in finally block even after failure'
+  );
+  assert.ok(queries.some(q => q.includes('pg_advisory_lock')));
+  assert.ok(queries.some(q => q.includes('pg_advisory_unlock')));
+});
+
+test('runUp releases advisory lock after successful migrations', async () => {
+  const queries = [];
+  let unlockCalled = false;
+
+  const mockClient = {
+    query: async text => {
+      queries.push(text);
+      if (text.includes('pg_advisory_lock')) {
+        return { rows: [] };
+      }
+      if (text.includes('pg_advisory_unlock')) {
+        unlockCalled = true;
+        return { rows: [{ unlocked: true }] };
+      }
+      if (text.includes('CREATE TABLE IF NOT EXISTS schema_migrations')) {
+        return { rows: [] };
+      }
+      if (text.includes('SELECT filename, file_hash, applied_at FROM schema_migrations')) {
+        const { listUpMigrationFilenames, fileHashFor } = require('../../db/migrateLib');
+        return {
+          rows: listUpMigrationFilenames().map(f => ({
+            filename: f,
+            file_hash: fileHashFor(f),
+            applied_at: new Date(),
+          })),
+        };
+      }
+      return { rows: [] };
+    },
+  };
+
+  await runUp(mockClient);
+  assert.equal(unlockCalled, true, 'pg_advisory_unlock must be called on successful completion');
+  assert.ok(queries.some(q => q.includes('pg_advisory_lock')));
+  assert.ok(queries.some(q => q.includes('pg_advisory_unlock')));
 });

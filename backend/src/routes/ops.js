@@ -17,6 +17,11 @@ const {
 } = require('../services/ops/healthCollector');
 const { executeRunbook } = require('../services/ops/runbooks');
 const { submitWalletTopUpPayment } = require('../services/stellarService');
+const {
+  listLedgerCheckpoints,
+  listLedgerAlerts,
+  requestBoundedBackfill,
+} = require('../services/ledgerMonitor');
 
 /**
  * Middleware to require and validate OPS_API_KEY.
@@ -57,6 +62,36 @@ function requireOpsApiKey(req, res, next) {
 }
 
 router.use(requireOpsApiKey);
+
+router.get(
+  '/ledger/checkpoints',
+  asyncHandler(async (req, res) => {
+    res.json({ checkpoints: await listLedgerCheckpoints(req.query.campaign_id || null) });
+  })
+);
+
+router.get(
+  '/ledger/alerts',
+  asyncHandler(async (req, res) => {
+    res.json({ alerts: await listLedgerAlerts(req.query.campaign_id || null) });
+  })
+);
+
+router.post(
+  '/ledger/backfill',
+  asyncHandler(async (req, res) => {
+    const { campaign_id, wallet_public_key, from_cursor, to_cursor, max_events } = req.body || {};
+    const result = await requestBoundedBackfill({
+      campaignId: campaign_id,
+      walletPublicKey: wallet_public_key,
+      fromCursor: from_cursor,
+      toCursor: to_cursor,
+      maxEvents: max_events,
+      requestedBy: null,
+    });
+    res.status(202).json({ backfill: result });
+  })
+);
 
 /**
  * GET /api/ops/health

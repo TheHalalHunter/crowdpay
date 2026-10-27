@@ -192,19 +192,33 @@ export default function WithdrawalsSection({ campaign, milestones = [], user, to
       if (!unsignedXdr) throw new Error('Missing unsigned transaction');
 
       const network = await getNetwork();
-      if (network?.error) throw new Error('Could not read Freighter network');
+    if (network?.error) throw new Error('Could not read Freighter network');
 
-      const signed = await signTransaction(unsignedXdr, {
-        networkPassphrase: network?.networkPassphrase,
-        address: user?.wallet_public_key,
-      });
-      if (signed?.error) throw new Error(signed.error?.message || 'Freighter signing failed');
-      if (!signed?.signedTxXdr) throw new Error('Freighter did not return a signed transaction');
+    // Check if the transaction XDR is expired
+    if (unsignedXdr.timeBounds?.maxTime) {
+      const maxTime = Number(unsignedXdr.timeBounds.maxTime);
+      if (Math.floor(Date.now() / 1000) > maxTime) {
+        throw new Error('This transaction has expired. Please request a new withdrawal quote.');
+      }
+    }
 
-      await api.approveWithdrawalCreator(id, { signed_xdr: signed.signedTxXdr });
-      await refresh();
+    const signed = await signTransaction(unsignedXdr, {
+      networkPassphrase: network?.networkPassphrase,
+      address: user?.wallet_public_key,
+    });
+    if (signed?.error) throw new Error(signed.error?.message || 'Freighter signing failed');
+    if (!signed?.signedTxXdr) throw new Error('Freighter did not return a signed transaction');
+
+    await api.approveWithdrawalCreator(id, { signed_xdr: signed.signedTxXdr });
+    await refresh();
     } catch (err) {
-      setError(err.message || 'Could not sign with Freighter');
+      if (err?.message && err.message.includes('expired')) {
+        setError('This withdrawal has expired. Please request a new quote.');
+      } else if (err?.message && err.message.includes('network')) {
+        setError('Network mismatch detected. Please switch your wallet to the correct network.');
+      } else {
+        setError(err.message || 'Could not sign with Freighter');
+      }
     } finally {
       setBusyId(null);
     }

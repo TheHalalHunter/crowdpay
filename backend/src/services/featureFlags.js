@@ -87,6 +87,22 @@ const FLAGS = {
     allowedRoles: null,
     allowedUserIds: null,
   },
+  'retention-purge-cron': {
+    description: 'Enable scheduled retention and privacy data purges',
+    envVar: 'ENABLE_RETENTION_PURGE_CRON',
+    defaultValue: true,
+    rolloutPct: null,
+    allowedRoles: null,
+    allowedUserIds: null,
+  },
+  'restore-verification-cron': {
+    description: 'Enable scheduled restore verification checks',
+    envVar: 'ENABLE_RESTORE_VERIFICATION_CRON',
+    defaultValue: true,
+    rolloutPct: null,
+    allowedRoles: null,
+    allowedUserIds: null,
+  },
   'scheduled-publish-cron': {
     description:
       'Enable the cron that auto-publishes draft campaigns at their scheduled_publish_at time',

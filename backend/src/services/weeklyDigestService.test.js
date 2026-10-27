@@ -1,3 +1,5 @@
+process.env.DATABASE_URL = process.env.DATABASE_URL || 'postgres://crowdpay:crowdpay@localhost:5432/crowdpay';
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const proxyquire = require('proxyquire').noCallThru();
@@ -79,7 +81,7 @@ test('sendWeeklyContributorDigests sends grouped digests and records delivery st
         }
         if (text.includes('INSERT INTO email_digest_deliveries')) {
           inserts.push(params);
-          return { rows: [] };
+          return { rows: [{ id: 'digest-1' }] };
         }
         throw new Error(`Unexpected query: ${text}`);
       },

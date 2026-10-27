@@ -1,5 +1,6 @@
 const router = require('express').Router();
 const { requireAuth } = require('../middleware/auth');
+const { idempotency } = require('../middleware/idempotency');
 const asyncHandler = require('../utils/asyncHandler');
 const {
   createSubscription,
@@ -131,6 +132,7 @@ router.post(
 router.post(
   '/campaigns/:id/subscriptions/submit',
   requireAuth,
+  idempotency('wallet:subscription-submit', { bodyField: 'idempotency_key' }),
   asyncHandler(async (req, res) => {
     const { unsignedXdr, signedXdr } = req.body || {};
     try {
@@ -143,6 +145,7 @@ router.post(
         asset: req.body.asset,
         periodMonths: req.body.periodMonths,
         totalPeriods: req.body.totalPeriods,
+        idempotencyKey: req.idempotencyKey || req.body.idempotency_key || null,
       });
       res.status(201).json(subscription);
     } catch (err) {
