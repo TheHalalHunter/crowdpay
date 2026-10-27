@@ -16,7 +16,7 @@ mod test {
         let (_contract_id, client) = setup_contract(&env);
         let admin = Address::generate(&env);
         let governance_token = Address::generate(&env);
-        
+
         client.initialize(
             &admin,
             &governance_token,
@@ -53,9 +53,9 @@ mod test {
         let (_contract_id, client) = setup_contract(&env);
         let admin = Address::generate(&env);
         let governance_token = Address::generate(&env);
-        
+
         client.initialize(&admin, &governance_token, &300, &400);
-        
+
         assert_eq!(client.get_fee(), 300);
     }
 
@@ -67,7 +67,7 @@ mod test {
         let (_contract_id, client) = setup_contract(&env);
         let admin = Address::generate(&env);
         let governance_token = Address::generate(&env);
-        
+
         client.initialize(&admin, &governance_token, &250, &500);
         client.initialize(&admin, &governance_token, &300, &400);
     }
@@ -79,11 +79,11 @@ mod test {
         let (_contract_id, client) = setup_contract(&env);
         let admin = Address::generate(&env);
         let governance_token = Address::generate(&env);
-        
+
         client.initialize(&admin, &governance_token, &250, &500);
-        
+
         client.admin_set_fee(&admin, &350, &450);
-        
+
         assert_eq!(client.get_fee(), 350);
         assert_eq!(client.get_creator_share(), 450);
     }
@@ -123,6 +123,42 @@ mod test {
     #[test]
     #[should_panic(expected = "Platform fee BPS must not exceed MAX_FEE_BPS")]
     fn test_admin_set_fee_rejects_fee_above_cap() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_contract_id, client) = setup_contract(&env);
+        let admin = Address::generate(&env);
+        let governance_token = Address::generate(&env);
+        client.initialize(&admin, &governance_token, &250, &500);
+
+        client.admin_set_fee(&admin, &1001, &500);
+    }
+
+    #[test]
+    #[should_panic(expected = "Creator share BPS must not exceed MAX_CREATOR_SHARE_BPS")]
+    fn test_admin_set_fee_rejects_creator_share_above_cap() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_contract_id, client) = setup_contract(&env);
+        let admin = Address::generate(&env);
+        let governance_token = Address::generate(&env);
+        client.initialize(&admin, &governance_token, &250, &500);
+
+        client.admin_set_fee(&admin, &250, &10001);
+    }
+
+    #[test]
+    #[should_panic(expected = "Platform fee BPS must not exceed MAX_FEE_BPS")]
+    fn test_initialize_rejects_fee_above_cap() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_contract_id, client) = setup_contract(&env);
+        let admin = Address::generate(&env);
+        let governance_token = Address::generate(&env);
+
+        client.initialize(&admin, &governance_token, &1001, &500);
+    }
+
+    #[test]
     fn test_vote_locks_deposit_and_prevents_transfer_double_voting() {
         use soroban_sdk::{testutils::Ledger, token};
 
@@ -130,7 +166,7 @@ mod test {
         env.mock_all_auths();
         let (contract_id, client) = setup_contract(&env);
         let admin = Address::generate(&env);
-        
+
         let token_admin = Address::generate(&env);
         let token_addr = env.register_stellar_asset_contract(token_admin.clone());
         let token_admin_client = token::StellarAssetClient::new(&env, &token_addr);
@@ -209,16 +245,7 @@ mod test {
         env.mock_all_auths();
         let (_contract_id, client) = setup_contract(&env);
         let admin = Address::generate(&env);
-        let governance_token = Address::generate(&env);
-        client.initialize(&admin, &governance_token, &250, &500);
 
-        client.admin_set_fee(&admin, &1001, &500);
-    }
-
-    #[test]
-    #[should_panic(expected = "Creator share BPS must not exceed MAX_CREATOR_SHARE_BPS")]
-    fn test_admin_set_fee_rejects_creator_share_above_cap() {
-        
         let token_admin = Address::generate(&env);
         let token_addr = env.register_stellar_asset_contract(token_admin.clone());
         let token_admin_client = token::StellarAssetClient::new(&env, &token_addr);
@@ -246,23 +273,7 @@ mod test {
         env.mock_all_auths();
         let (_contract_id, client) = setup_contract(&env);
         let admin = Address::generate(&env);
-        let governance_token = Address::generate(&env);
-        client.initialize(&admin, &governance_token, &250, &500);
 
-        client.admin_set_fee(&admin, &250, &10001);
-    }
-
-    #[test]
-    #[should_panic(expected = "Platform fee BPS must not exceed MAX_FEE_BPS")]
-    fn test_initialize_rejects_fee_above_cap() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (_contract_id, client) = setup_contract(&env);
-        let admin = Address::generate(&env);
-        let governance_token = Address::generate(&env);
-
-        client.initialize(&admin, &governance_token, &1001, &500);
-        
         let token_admin = Address::generate(&env);
         let token_addr = env.register_stellar_asset_contract(token_admin.clone());
         let token_admin_client = token::StellarAssetClient::new(&env, &token_addr);
