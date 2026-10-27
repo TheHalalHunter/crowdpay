@@ -8,17 +8,14 @@
  * and alerts maintainers on failure without exposing backup contents.
  */
 
+const path = require('path');
+const fs = require('fs');
 const db = require('../config/database');
-const { compareSnapshots } = require('../db/verify-schema-convergence');
-const { saveDraft, listVersions, getVersion } = require('../src/services/campaignDraftVersionService');
+const { listVersions, restoreVersion } = require('./campaignDraftVersionService');
 const logger = require('../config/logger');
 
 const VERIFICATION_REASON = 'scheduled-restore-verification';
 const MAX_VERSIONS_TO_CHECK = 5;
-const SCHEMA_FILE = path.join(__dirname, '..', 'db', 'schema.sql');
-
-const path = require('path');
-const fs = require('fs');
 
 function isIsolationRunner(runner) {
   return runner && runner.config && runner.config.isolation;

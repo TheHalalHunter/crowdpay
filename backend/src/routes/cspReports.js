@@ -10,7 +10,8 @@ const MAX_REPORTS_PER_REQUEST = 20;
 const MAX_FIELD_LENGTH = 2048;
 
 const SAFE_OPAQUE_VALUES = new Set(['inline', 'eval', 'wasm-eval', 'self', 'none']);
-const CONTROL_CHARS_PATTERN = new RegExp('[\\u0000-\\u001f\\u007f]', 'g');
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARS_PATTERN = /[\u0000-\u001f\u007f]/g;
 
 function cleanString(value, maxLength = MAX_FIELD_LENGTH) {
   if (value === null || value === undefined) return null;
